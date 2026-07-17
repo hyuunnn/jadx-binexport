@@ -121,17 +121,6 @@ Matches are linked by name (each method's full signature is written as
 `mangled_name`), so navigation works despite the synthetic addresses — just diff
 in a jadx session opened on the same app + jadx version that produced the exports.
 
-## Works through obfuscation
-
-The whole point is diffing app versions whose symbols are renamed (ProGuard/R8),
-where names carry no signal. BinDiff matches on structure (call graph + CFG) and
-on `Instruction.raw_bytes` — a canonical, file-independent rendering of each
-instruction (mnemonic + operands + wrapped invokes) that this plugin emits so
-BinDiff's content-hash matchers work. On a benchmark of one app obfuscated twice
-with **disjoint R8 name dictionaries** (so every method name differs), matches
-scored against R8's `mapping.txt` were **96% correct**; dropping `raw_bytes` in a
-control run collapsed that to 23%, so it is load-bearing, not cosmetic.
-
 ## Important
 
 - **Export both sides with the same jadx version.** jadx emits a normalized IR (not
@@ -151,7 +140,7 @@ control run collapsed that to 23%, so it is load-bearing, not cosmetic.
 - Real APK via jadx's `dex-input` path: a 1.3 MB APK exported to 13,226 functions /
   90,106 instructions with all structural invariants holding.
 - BinDiff ingestion: the emitted files load and diff (13,226/13,226 self-match),
-  and the obfuscated-rename benchmark above scores 96% correct.
+  and matches hold up on obfuscated (renamed) builds.
 - Deterministic: two exports of the same input are byte-identical (minus timestamp).
 
 An opt-in smoke test runs the real-APK path:
