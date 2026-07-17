@@ -98,10 +98,11 @@ bindiff app-v1.BinExport app-v2.BinExport --output_dir results/
 
 ### jadx 안에서 바로 디핑하고 탐색 (IDA BinDiff 플러그인처럼)
 
-`bindiff`를 직접 돌릴 필요 없다. 앱 **A**를 jadx-gui에 연 상태에서, 앱 **B**는 이미
-`B.BinExport`로 내보내 뒀다면:
+`bindiff`를 직접 돌릴 필요 없다. diff는 항상 `.BinExport` 두 개로 만들어지는데,
+jadx엔 이미 한쪽(열린 앱)이 있으니 **나머지 한쪽만 열면** 된다. 앱 **A**를 jadx-gui에
+연 상태에서, 앱 **B**는 이미 `B.BinExport`로 내보내 뒀다면:
 
-**Plugins → Diff against BinExport (.BinExport)…** → `B.BinExport` 선택.
+**Plugins → Open BinExport (.BinExport)…** → `B.BinExport` 선택.
 
 플러그인이 A를 export하고, A vs B로 `bindiff`를 돌린 뒤, 결과를 한 번에 연다. 열린
 앱(A)에 속한 매칭 함수들이 테이블로 뜨고, 유사도 순(바뀐 함수부터)으로 정렬되어
@@ -111,11 +112,9 @@ bindiff app-v1.BinExport app-v2.BinExport --output_dir results/
 `bindiff` 실행 파일이 필요하다. `PATH`에 없으면 `apk-diff-binexport.bindiff` 플러그인
 옵션에 전체 경로를 지정하면 된다.
 
-이미 `.BinDiff`가 있다면(CLI로 만들었거나 이전 실행분) 디핑 단계를 건너뛴다:
-**Plugins → Open BinDiff results (.BinDiff)…** → `.BinDiff` 선택.
-
 매칭은 이름으로 연결되므로(각 메서드의 전체 시그니처를 `mangled_name`으로 기록) 주소가
-합성값이어도 네비게이션이 동작한다 — 단, 같은 앱·같은 jadx 버전으로 연 세션에서 디핑/로드해야 한다.
+합성값이어도 네비게이션이 동작한다 — 단, export를 만든 것과 같은 앱·같은 jadx 버전
+세션에서 디핑해야 한다.
 
 ## 난독화에도 동작한다
 

@@ -54,25 +54,11 @@ final class BinDiffResultsPanel {
 	private BinDiffResultsPanel() {
 	}
 
-	/** Menu entry point: pick a .BinDiff file, load it, show the results table. */
-	static void promptAndShow(JadxPluginContext context) {
-		JadxGuiContext gui = context.getGuiContext();
-		if (gui == null) {
-			return;
-		}
-		JFileChooser chooser = new JFileChooser();
-		chooser.setDialogTitle("Open BinDiff results (.BinDiff)");
-		chooser.setFileFilter(new FileNameExtensionFilter("BinDiff results (*.BinDiff)", "BinDiff"));
-		if (chooser.showOpenDialog(gui.getMainFrame()) != JFileChooser.APPROVE_OPTION) {
-			return;
-		}
-		loadAndShow(context, chooser.getSelectedFile());
-	}
-
 	/**
-	 * Menu entry point for the IDA-like flow: pick another app's {@code
+	 * Menu entry point (IDA BinDiff-plugin style): open another app's {@code
 	 * .BinExport}, diff the currently-open app against it via bindiff, and show
-	 * the navigable results.
+	 * the navigable results. jadx already holds one side (the open app), so only
+	 * the OTHER side's export needs to be opened.
 	 */
 	static void promptAndDiff(JadxPluginContext context, BinExportOptions options) {
 		JadxGuiContext gui = context.getGuiContext();
@@ -80,7 +66,7 @@ final class BinDiffResultsPanel {
 			return;
 		}
 		JFileChooser chooser = new JFileChooser();
-		chooser.setDialogTitle("Diff current app against a .BinExport (the OTHER version)");
+		chooser.setDialogTitle("Open the OTHER version's .BinExport to diff against this app");
 		chooser.setFileFilter(new FileNameExtensionFilter("BinExport (*.BinExport)", "BinExport"));
 		if (chooser.showOpenDialog(gui.getMainFrame()) != JFileChooser.APPROVE_OPTION) {
 			return;
