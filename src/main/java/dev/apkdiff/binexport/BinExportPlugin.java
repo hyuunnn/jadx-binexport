@@ -77,6 +77,10 @@ public class BinExportPlugin implements JadxPlugin {
 					throw t;
 				}
 			});
+			// Load a BinDiff results DB and browse matches with click-to-navigate,
+			// like the IDA BinDiff plugin.
+			gui.addMenuAction("Open BinDiff results (.BinDiff)...",
+					() -> BinDiffResultsPanel.promptAndShow(context));
 		} else {
 			context.addPass(new SimpleAfterLoadPass("BinExportPass",
 					dec -> Exporter.runLogged(dec, options)));

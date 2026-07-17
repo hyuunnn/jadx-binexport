@@ -100,6 +100,20 @@ Open BinDiff → **New Diff** → pick the two `.BinExport` files → run. You g
 bindiff app-v1.BinExport app-v2.BinExport --output_dir results/
 ```
 
+### Browse results back in jadx (click-to-navigate)
+
+Like the IDA BinDiff plugin, you can browse the match results inside jadx-gui and
+jump straight to a function. With the app open in jadx-gui:
+
+**Plugins → Open BinDiff results (.BinDiff)…** → pick the `.BinDiff` produced above.
+
+A table lists every matched function that belongs to the open app, sorted by
+similarity (changed functions first) and colored red→green. **Double-click a row
+(or press Enter) to open that method in jadx.** A filter box narrows the list.
+Matches are linked by name (the exporter writes each method's full signature as
+`mangled_name`), so navigation works even when the addresses are synthetic — just
+load the `.BinDiff` in a jadx session opened on the same app + jadx version.
+
 ## Works through obfuscation
 
 The whole point is diffing app versions whose symbols are renamed (ProGuard/R8),

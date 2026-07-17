@@ -25,6 +25,11 @@ dependencies {
     // Bundled (shaded + relocated) into the plugin jar.
     implementation "com.google.protobuf:protobuf-java:${protobufVersion}"
 
+    // Reads BinDiff result databases (.BinDiff = SQLite) for the GUI results
+    // browser. NOT relocated: jadx bundles no SQLite, so there is no clash, and
+    // relocating org.sqlite would break its native-library resource lookup.
+    implementation 'org.xerial:sqlite-jdbc:3.44.1.0'
+
     // Integration test: run the exporter against a real jadx model built from
     // compiled .class input; the optional smoke test additionally needs the
     // DEX input plugin (the real APK path).

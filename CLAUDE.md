@@ -16,9 +16,11 @@ serialize it. The proto was designed with DEX in mind (`Architecture::kDex`,
 ```
 src/main/proto/binexport2.proto                     # vendored verbatim from google/binexport
 src/main/java/dev/apkdiff/binexport/
-  BinExportPlugin.java   # JadxPlugin. CLI/library => auto (SimpleAfterLoadPass); GUI => menu action
-  BinExportOptions.java  # per-instance plugin options (output/outdir), sysprop fallback
-  Exporter.java          # THE mapping logic (jadx model -> BinExport2)
+  BinExportPlugin.java     # JadxPlugin. CLI/library => auto (SimpleAfterLoadPass); GUI => 2 menu actions
+  BinExportOptions.java    # per-instance plugin options (output/outdir), sysprop fallback
+  Exporter.java            # THE mapping logic (jadx model -> BinExport2)
+  BinDiffResults.java      # reads a .BinDiff (SQLite) + builds mangledName->MethodNode index (testable core)
+  BinDiffResultsPanel.java # GUI-only: navigable results table, double-click => jump to method
 src/main/resources/META-INF/services/jadx.api.plugins.JadxPlugin   # plugin registration
 src/test/java/.../ExporterIntegrationTest.java      # real jadx E2E test
 ```
@@ -70,7 +72,9 @@ Output path resolution (first wins): plugin option `apk-diff-binexport.output` (
 
 8. **Synthetic `raw_bytes` are load-bearing for obfuscated diffs.** We emit a canonical text rendering of each insn tree (mnemonic, callee id, regs, literals, wrapped insns) as `raw_bytes`. BinDiff SDBM-hashes these into its function/basic-block "hash matching" steps — its two highest-confidence matchers. With empty bytes every hash is 0 and those steps can never match. On same-name inputs the effect is small (name matching runs first), but when ProGuard/R8 renames symbols between versions — the primary use case — content hashes become the top signal. Rendering must stay deterministic and file-independent (no operand/expression INDICES, only content).
 
-9. **Sysprop passing on the jadx CLI.** jadx has NO `-J` JVM-arg passthrough (unknown options become input files via JCommander's `acceptUnknownOptions`). Legacy sysprops must go through `JADX_OPTS`/`JAVA_OPTS` env vars; the plugin options (`-Papk-diff-binexport.output=...`) are the primary interface. jadx calls `setOptions` during `registerOptions()` in every mode (CLI/GUI/library), and `BasePluginOptionsBuilder` invokes setters with `defaultValue` for absent keys.
+9. **BinDiff results browser (GUI, reverse direction).** A second GUI menu action ("Open BinDiff results (.BinDiff)…") reads a BinDiff results DB and shows a navigable table; double-click => `JadxGuiContext.open(methodNode)` jumps to the method. Key points: (a) `.BinDiff` is a **SQLite** file — its `function` table has `name1/name2/similarity/confidence`, and `name1/name2` are exactly our `mangled_name` (`MethodInfo.getRawFullId()`), so navigation is **by name, not by the synthetic address**. (b) `BinDiffResults.methodIndex` MUST enumerate methods the SAME way `Exporter` does (`getRoot().getClasses()` + inner/inlined, includes `<init>`) — using the API-level `JavaClass.getMethods()` drops constructors and misses matches. (c) `MethodNode implements ICodeNode extends ICodeNodeRef`, so it is passed straight to `open()`. (d) SQLite via `org.xerial:sqlite-jdbc`, **bundled but NOT relocated** (jadx has no SQLite so no clash; relocating `org.sqlite` breaks its native-lib resource lookup). Use `SQLiteDataSource` (not `DriverManager`) to dodge the child-classloader SPI problem in the plugin classloader. Testable core (`BinDiffResults`) is separate from the Swing shell (`BinDiffResultsPanel`) because Swing can't instantiate headless.
+
+10. **Sysprop passing on the jadx CLI.** jadx has NO `-J` JVM-arg passthrough (unknown options become input files via JCommander's `acceptUnknownOptions`). Legacy sysprops must go through `JADX_OPTS`/`JAVA_OPTS` env vars; the plugin options (`-Papk-diff-binexport.output=...`) are the primary interface. jadx calls `setOptions` during `registerOptions()` in every mode (CLI/GUI/library), and `BasePluginOptionsBuilder` invokes setters with `defaultValue` for absent keys.
 
 ## BinExport2 format rules (from the canonical reference)
 
