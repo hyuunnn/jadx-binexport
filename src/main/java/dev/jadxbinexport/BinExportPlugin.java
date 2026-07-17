@@ -1,6 +1,9 @@
 package dev.jadxbinexport;
 
+import java.io.File;
 import java.util.concurrent.atomic.AtomicBoolean;
+
+import javax.swing.JOptionPane;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -65,7 +68,18 @@ public class BinExportPlugin implements JadxPlugin {
 				try {
 					new Thread(() -> {
 						try {
-							Exporter.runLogged(context.getDecompiler(), options);
+							// Report where it went / why it failed: the GUI has no out
+							// dir configured, so the resolved path is not obvious and a
+							// log-only failure would be invisible without the Log Viewer.
+							File out = Exporter.run(context.getDecompiler(), options);
+							gui.uiRun(() -> JOptionPane.showMessageDialog(gui.getMainFrame(),
+									"Exported to:\n" + out.getAbsolutePath(),
+									"BinExport", JOptionPane.INFORMATION_MESSAGE));
+						} catch (Throwable t) {
+							LOG.error("[BinExport] export failed", t);
+							gui.uiRun(() -> JOptionPane.showMessageDialog(gui.getMainFrame(),
+									"Export failed:\n" + t.getMessage(),
+									"BinExport", JOptionPane.ERROR_MESSAGE));
 						} finally {
 							running.set(false);
 						}

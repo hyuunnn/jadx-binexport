@@ -7,6 +7,7 @@ import java.io.OutputStream;
 import java.nio.file.Files;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.EnumMap;
@@ -17,6 +18,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.locks.ReentrantLock;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,9 +32,14 @@ import jadx.api.JadxDecompiler;
 import jadx.api.plugins.utils.CommonFileUtils;
 import jadx.core.Jadx;
 import jadx.core.dex.info.MethodInfo;
+import jadx.core.dex.instructions.ArithNode;
 import jadx.core.dex.instructions.BaseInvokeNode;
+import jadx.core.dex.instructions.ConstClassNode;
+import jadx.core.dex.instructions.ConstStringNode;
 import jadx.core.dex.instructions.IfNode;
+import jadx.core.dex.instructions.IndexInsnNode;
 import jadx.core.dex.instructions.InsnType;
+import jadx.core.dex.instructions.SwitchInsn;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.LiteralArg;
 import jadx.core.dex.instructions.args.RegisterArg;
@@ -60,10 +67,17 @@ public final class Exporter {
 	private static final long METHOD_ADDR_STRIDE = 1L << METHOD_ADDR_SHIFT;
 
 	// BinDiff silently discards function bodies above these (flow_graph.cc
-	// kMaxFunctionInstructions/kMaxFunctionBasicBlocks); we export them anyway
-	// (other consumers may cope) but count and surface it.
+	// kMaxFunctionInstructions/kMaxFunctionBasicBlocks/kMaxFunctionEdges); we
+	// export them anyway (other consumers may cope) but count and surface it.
 	private static final int BINDIFF_MAX_INSNS = 10_000;
 	private static final int BINDIFF_MAX_BLOCKS = 5_000;
+	private static final int BINDIFF_MAX_EDGES = 5_000;
+
+	// export() drives forceProcess, which mutates the shared jadx model; two
+	// concurrent exports on the same decompiler (the Export and Open-BinExport GUI
+	// actions, or two diffs) would race on ClassNode processing state. Serialize
+	// them - the runs are minutes-long but always safe.
+	private static final ReentrantLock EXPORT_LOCK = new ReentrantLock();
 
 	private static final String NOP = "nop";
 	private static final ByteString NOP_BYTES = ByteString.copyFromUtf8(NOP);
@@ -121,14 +135,24 @@ public final class Exporter {
 	}
 
 	public static File run(JadxDecompiler decompiler, BinExportOptions options) {
-		return new Exporter(options).export(decompiler);
+		return new Exporter(options).exportLocked(decompiler);
 	}
 
 	/** Exports to an explicit file, bypassing option/sysprop path resolution. */
 	public static File runToFile(JadxDecompiler decompiler, File out) {
 		Exporter e = new Exporter(null);
 		e.explicitOutput = out;
-		return e.export(decompiler);
+		return e.exportLocked(decompiler);
+	}
+
+	/** Serializes model-mutating exports against each other (see EXPORT_LOCK). */
+	private File exportLocked(JadxDecompiler decompiler) {
+		EXPORT_LOCK.lock();
+		try {
+			return export(decompiler);
+		} finally {
+			EXPORT_LOCK.unlock();
+		}
 	}
 
 	/** Shared error contract for the CLI pass and the GUI action. */
@@ -150,15 +174,23 @@ public final class Exporter {
 			collect(cls, visited);
 		}
 
-		// 2. Deterministic method ordering => stable synthetic addresses.
+		// 2. Deterministic method ordering => stable synthetic addresses. Drop
+		// duplicate rawIds (the same class present in two inputs / deduplicated
+		// multidex entries): keeping both would emit two call-graph vertices with
+		// an identical mangled_name at different addresses, which BinDiff's name
+		// matching cannot tell apart. Keep the first copy; calls resolve to it.
 		methods.sort(Comparator.comparing(this::rawId));
-		for (int i = 0; i < methods.size(); i++) {
-			String id = rawId(methods.get(i));
-			Integer prev = methodIndexByRawId.putIfAbsent(id, i);
-			if (prev != null) {
-				LOG.warn("[BinExport] duplicate method id '{}'; calls resolve to its first copy", id);
+		List<MethodNode> deduped = new ArrayList<>(methods.size());
+		for (MethodNode mth : methods) {
+			String id = rawId(mth);
+			if (methodIndexByRawId.putIfAbsent(id, deduped.size()) == null) {
+				deduped.add(mth);
+			} else {
+				LOG.warn("[BinExport] duplicate method id '{}'; keeping only the first copy", id);
 			}
 		}
+		methods.clear();
+		methods.addAll(deduped);
 		resolveBodies();
 
 		// 3. Global tables and graphs (order matters for index bookkeeping).
@@ -186,9 +218,9 @@ public final class Exporter {
 					processFailed.size());
 		}
 		if (binDiffOversized > 0) {
-			LOG.info("[BinExport] {} method(s) exceed BinDiff's per-function limits (>={} instructions or >={} blocks);"
-					+ " BinDiff will match them by name/call-graph only",
-					binDiffOversized, BINDIFF_MAX_INSNS, BINDIFF_MAX_BLOCKS);
+			LOG.info("[BinExport] {} method(s) exceed BinDiff's per-function limits (>={} instructions, >={} blocks"
+					+ " or >={} edges); BinDiff will match them by name/call-graph only",
+					binDiffOversized, BINDIFF_MAX_INSNS, BINDIFF_MAX_BLOCKS, BINDIFF_MAX_EDGES);
 		}
 		LOG.info("[BinExport] wrote {} methods, {} instructions to {}",
 				methods.size(), be.getInstructionCount(), out.getAbsolutePath());
@@ -241,15 +273,17 @@ public final class Exporter {
 		}
 		List<BlockNode> blocks = rawBlocks(mth);
 		long emitted = 0;
+		long edges = 0;
 		for (BlockNode b : blocks) {
 			emitted += Math.max(1, b.getInstructions().size());
+			edges += b.getSuccessors().size();
 		}
 		if (emitted >= METHOD_ADDR_STRIDE) {
 			LOG.warn("[BinExport] method {} emits {} instructions, exceeding the 2^{} per-method address space;"
 					+ " exported without body", rawId(mth), emitted, METHOD_ADDR_SHIFT);
 			return Collections.emptyList();
 		}
-		if (emitted >= BINDIFF_MAX_INSNS || blocks.size() >= BINDIFF_MAX_BLOCKS) {
+		if (emitted >= BINDIFF_MAX_INSNS || blocks.size() >= BINDIFF_MAX_BLOCKS || edges >= BINDIFF_MAX_EDGES) {
 			binDiffOversized++;
 		}
 		BlockNode enter = mth.getEnterBlock();
@@ -497,6 +531,7 @@ public final class Exporter {
 				sb.append(' ').append(calleeRawId(callee));
 			}
 		}
+		appendPayload(insn, sb);
 		RegisterArg result = insn.getResult();
 		if (result != null) {
 			sb.append(" v").append(result.getRegNum());
@@ -519,6 +554,33 @@ public final class Exporter {
 			} else {
 				sb.append("arg");
 			}
+		}
+	}
+
+	/**
+	 * Appends the instruction's own payload - the per-method constants that live
+	 * in InsnNode subclass fields, not in the argument list: string/class
+	 * constants, field/type references (IGET/IPUT/SGET/CHECK_CAST/...), and the
+	 * comparison/arithmetic operator (the mnemonic alone renders every {@code if}
+	 * or {@code arith} identically). These are exactly the content that breaks
+	 * MD-index ties in BinDiff's hash matching, so omitting them collapses two
+	 * methods that differ only in a constant or operator to identical raw_bytes.
+	 * Uses the payloads' content (never a file-local index), so it stays
+	 * deterministic and comparable across exports.
+	 */
+	private static void appendPayload(InsnNode insn, StringBuilder sb) {
+		if (insn instanceof IfNode) {
+			sb.append(' ').append(((IfNode) insn).getOp());
+		} else if (insn instanceof ArithNode) {
+			sb.append(' ').append(((ArithNode) insn).getOp());
+		} else if (insn instanceof ConstStringNode) {
+			sb.append(" \"").append(((ConstStringNode) insn).getString()).append('"');
+		} else if (insn instanceof ConstClassNode) {
+			sb.append(' ').append(((ConstClassNode) insn).getClsType());
+		} else if (insn instanceof SwitchInsn) {
+			sb.append(' ').append(Arrays.toString(((SwitchInsn) insn).getKeys()));
+		} else if (insn instanceof IndexInsnNode) {
+			sb.append(' ').append(((IndexInsnNode) insn).getIndex());
 		}
 	}
 
@@ -649,11 +711,14 @@ public final class Exporter {
 		if (outdir != null && !outdir.isEmpty()) {
 			dir = new File(outdir);
 		} else if (args.getOutDir() != null) {
+			// jadx-gui leaves this a cwd-relative dir (basename of the input), so
+			// resolve to an absolute path - otherwise the file lands relative to the
+			// process working dir (e.g. "/" for a Finder-launched app), unfindable.
 			dir = args.getOutDir();
 		} else {
 			dir = new File(".");
 		}
-		return new File(dir, base + ".BinExport");
+		return new File(dir, base + ".BinExport").getAbsoluteFile();
 	}
 
 	private static File firstInput(JadxArgs args) {

@@ -315,6 +315,10 @@ final class BinDiffResultsPanel {
 			if (!selected) {
 				float hue = (float) (Math.max(0.0, Math.min(1.0, s)) * 0.33); // 0=red .. 0.33=green
 				c.setBackground(Color.getHSBColor(hue, 0.18f, 0.98f));
+				// The tint is always near-white; pin a dark foreground so the cell
+				// stays readable under dark themes (whose default table foreground
+				// is near-white, which would render white-on-white here).
+				c.setForeground(Color.BLACK);
 			}
 			return c;
 		}
