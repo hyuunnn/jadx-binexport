@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="jadx-binexport 로고" width="150">
+</p>
+
 # jadx-binexport — jadx → BinExport 플러그인
 
 [English README](README.md)

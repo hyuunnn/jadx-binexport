@@ -124,7 +124,12 @@ final class BinDiffRunner {
 		return files != null && files.length > 0 ? files[0] : null;
 	}
 
-	/** Locates bindiff: plugin option, then PATH, then common install paths. */
+	/**
+	 * Best-effort auto-detection: PATH, then common install paths. Reached from
+	 * {@link #resolveBindiff} only when no explicit option is set (that path is
+	 * handled authoritatively upstream), so the option candidate below matters
+	 * only for direct callers/tests that pass one.
+	 */
 	static String findBindiff(BinExportOptions options) {
 		String[] candidates = {
 				options != null ? options.getBindiff() : null,
@@ -174,11 +179,14 @@ final class BinDiffRunner {
 		if (!p.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
 			p.destroyForcibly();
 			p.waitFor(5, TimeUnit.SECONDS);
-			reader.join(1000);
+			reader.join(1000); // already failing; don't block the caller further
 			throw new IllegalStateException(
 					"bindiff timed out after " + timeoutSeconds + "s: " + String.join(" ", cmd));
 		}
-		reader.join(2000);
+		// The process has exited, so its stdout is at EOF and the reader returns
+		// promptly; join without a timeout so out is fully written (and safely
+		// published) before we read it - a bounded join could race the append.
+		reader.join();
 		return new ProcResult(p.exitValue(), out.toString());
 	}
 

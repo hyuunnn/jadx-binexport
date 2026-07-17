@@ -36,9 +36,11 @@ import jadx.core.dex.instructions.ArithNode;
 import jadx.core.dex.instructions.BaseInvokeNode;
 import jadx.core.dex.instructions.ConstClassNode;
 import jadx.core.dex.instructions.ConstStringNode;
+import jadx.core.dex.instructions.FillArrayInsn;
 import jadx.core.dex.instructions.IfNode;
 import jadx.core.dex.instructions.IndexInsnNode;
 import jadx.core.dex.instructions.InsnType;
+import jadx.core.dex.instructions.NewArrayNode;
 import jadx.core.dex.instructions.SwitchInsn;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.LiteralArg;
@@ -560,9 +562,10 @@ public final class Exporter {
 	/**
 	 * Appends the instruction's own payload - the per-method constants that live
 	 * in InsnNode subclass fields, not in the argument list: string/class
-	 * constants, field/type references (IGET/IPUT/SGET/CHECK_CAST/...), and the
-	 * comparison/arithmetic operator (the mnemonic alone renders every {@code if}
-	 * or {@code arith} identically). These are exactly the content that breaks
+	 * constants, field/type references (IGET/IPUT/SGET/CHECK_CAST/...), array
+	 * type/dimension and fill-array data, switch keys, and the comparison/
+	 * arithmetic operator (the mnemonic alone renders every {@code if} or
+	 * {@code arith} identically). These are exactly the content that breaks
 	 * MD-index ties in BinDiff's hash matching, so omitting them collapses two
 	 * methods that differ only in a constant or operator to identical raw_bytes.
 	 * Uses the payloads' content (never a file-local index), so it stays
@@ -577,8 +580,22 @@ public final class Exporter {
 			sb.append(" \"").append(((ConstStringNode) insn).getString()).append('"');
 		} else if (insn instanceof ConstClassNode) {
 			sb.append(' ').append(((ConstClassNode) insn).getClsType());
+		} else if (insn instanceof NewArrayNode) {
+			NewArrayNode na = (NewArrayNode) insn;
+			sb.append(' ').append(na.getArrayType()).append('#').append(na.getDimension());
+		} else if (insn instanceof FillArrayInsn) {
+			// Array contents live in FillArrayData, not the argument list. Rare, so
+			// the guard cost is negligible; the data may not be attached yet.
+			try {
+				sb.append(' ').append(((FillArrayInsn) insn).dataToString());
+			} catch (RuntimeException ignored) {
+				// no attached data => fall back to the mnemonic alone
+			}
 		} else if (insn instanceof SwitchInsn) {
-			sb.append(' ').append(Arrays.toString(((SwitchInsn) insn).getKeys()));
+			int[] keys = ((SwitchInsn) insn).getKeys();
+			if (keys != null) {
+				sb.append(' ').append(Arrays.toString(keys));
+			}
 		} else if (insn instanceof IndexInsnNode) {
 			sb.append(' ').append(((IndexInsnNode) insn).getIndex());
 		}
