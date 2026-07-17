@@ -21,6 +21,7 @@ import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.google.protobuf.ByteString;
 import com.google.security.zynamics.BinExport.BinExport2;
 import com.google.security.zynamics.BinExport.BinExport2.Builder;
 
@@ -57,7 +58,14 @@ public final class Exporter {
 	private static final long METHOD_ADDR_SHIFT = 20;
 	private static final long METHOD_ADDR_STRIDE = 1L << METHOD_ADDR_SHIFT;
 
+	// BinDiff silently discards function bodies above these (flow_graph.cc
+	// kMaxFunctionInstructions/kMaxFunctionBasicBlocks); we export them anyway
+	// (other consumers may cope) but count and surface it.
+	private static final int BINDIFF_MAX_INSNS = 10_000;
+	private static final int BINDIFF_MAX_BLOCKS = 5_000;
+
 	private static final String NOP = "nop";
+	private static final ByteString NOP_BYTES = ByteString.copyFromUtf8(NOP);
 
 	/** InsnType is a small fixed enum; derive each mnemonic string exactly once. */
 	private static final Map<InsnType, String> MNEMONIC_BY_TYPE = buildMnemonicTable();
@@ -86,6 +94,9 @@ public final class Exporter {
 	private static final int NOT_IN_APP = -1;
 	private final Map<MethodInfo, Integer> calleeIdxCache = new IdentityHashMap<>();
 	private final Map<MethodInfo, Integer> calleeOperandIdx = new IdentityHashMap<>();
+	private final Map<MethodInfo, String> calleeRawIdCache = new IdentityHashMap<>();
+
+	private int binDiffOversized = 0;
 
 	// Operand de-dup keyed by the primitive that fully determines the operand
 	// (every operand here is a single expression), so the hit path allocates no
@@ -165,6 +176,11 @@ public final class Exporter {
 			LOG.warn("[BinExport] {} top-level class(es) failed to process; their methods were exported without bodies",
 					processFailed.size());
 		}
+		if (binDiffOversized > 0) {
+			LOG.info("[BinExport] {} method(s) exceed BinDiff's per-function limits (>={} instructions or >={} blocks);"
+					+ " BinDiff will match them by name/call-graph only",
+					binDiffOversized, BINDIFF_MAX_INSNS, BINDIFF_MAX_BLOCKS);
+		}
 		LOG.info("[BinExport] wrote {} methods, {} instructions to {}",
 				methods.size(), be.getInstructionCount(), out.getAbsolutePath());
 		return out;
@@ -223,6 +239,27 @@ public final class Exporter {
 			LOG.warn("[BinExport] method {} emits {} instructions, exceeding the 2^{} per-method address space;"
 					+ " exported without body", rawId(mth), emitted, METHOD_ADDR_SHIFT);
 			return Collections.emptyList();
+		}
+		if (emitted >= BINDIFF_MAX_INSNS || blocks.size() >= BINDIFF_MAX_BLOCKS) {
+			binDiffOversized++;
+		}
+		BlockNode enter = mth.getEnterBlock();
+		if (enter != null && blocks.get(0) != enter && blocks.contains(enter)) {
+			// BinDiff associates a flow graph with its call-graph vertex by the
+			// entry block's first-instruction address, which must equal the vertex
+			// address (this method's base) or BinDiff aborts the whole diff. jadx
+			// normally keeps the enter block at index 0, but e.g. a loop
+			// pre-header insertion can append a fresh enter block at the END of
+			// the list - move it to the front before emission order assigns
+			// addresses.
+			List<BlockNode> reordered = new ArrayList<>(blocks.size());
+			reordered.add(enter);
+			for (BlockNode b : blocks) {
+				if (b != enter) {
+					reordered.add(b);
+				}
+			}
+			blocks = reordered;
 		}
 		return blocks;
 	}
@@ -352,6 +389,13 @@ public final class Exporter {
 		if (idx != 0) {
 			ib.setMnemonicIndex(idx);
 		}
+		// Synthetic raw_bytes: a canonical, file-independent rendering of the
+		// instruction. BinDiff SDBM-hashes raw_bytes into its function- and
+		// basic-block-level "hash matching" steps (its two highest-confidence
+		// matchers); with empty bytes every hash is 0 and those steps can never
+		// match anything. Safe because we set an address on every instruction,
+		// so the byte length is never used to reconstruct addresses.
+		ib.setRawBytes(insn == null ? NOP_BYTES : renderBytes(insn));
 		if (insn != null) {
 			for (int opIndex : buildOperands(insn)) {
 				ib.addOperandIndex(opIndex);
@@ -376,7 +420,7 @@ public final class Exporter {
 			MethodInfo callee = ((BaseInvokeNode) insn).getCallMth();
 			if (callee != null) {
 				ops.add(calleeOperandIdx.computeIfAbsent(callee,
-						c -> operandForSymbol(c.getRawFullId())));
+						c -> operandForSymbol(calleeRawId(c))));
 			}
 		}
 		RegisterArg result = insn.getResult();
@@ -423,6 +467,54 @@ public final class Exporter {
 						.setType(BinExport2.Expression.Type.SYMBOL)
 						.setSymbol(s)
 						.build()));
+	}
+
+	private ByteString renderBytes(InsnNode insn) {
+		StringBuilder sb = new StringBuilder(32);
+		renderInsn(insn, sb);
+		return ByteString.copyFromUtf8(sb.toString());
+	}
+
+	/**
+	 * Canonical text form of an insn tree: mnemonic, callee id, result/arg
+	 * registers, literals, and wrapped insns (recursively). Deterministic and
+	 * file-independent, so identical code hashes identically across exports.
+	 */
+	private void renderInsn(InsnNode insn, StringBuilder sb) {
+		sb.append(mnemonicOf(insn));
+		if (insn instanceof BaseInvokeNode) {
+			MethodInfo callee = ((BaseInvokeNode) insn).getCallMth();
+			if (callee != null) {
+				sb.append(' ').append(calleeRawId(callee));
+			}
+		}
+		RegisterArg result = insn.getResult();
+		if (result != null) {
+			sb.append(" v").append(result.getRegNum());
+		}
+		for (InsnArg arg : insn.getArguments()) {
+			sb.append(' ');
+			if (arg.isLiteral()) {
+				sb.append(((LiteralArg) arg).getLiteral());
+			} else if (arg.isRegister()) {
+				sb.append('v').append(((RegisterArg) arg).getRegNum());
+			} else if (arg.isInsnWrap()) {
+				InsnNode wrapped = arg.unwrap();
+				if (wrapped != null) {
+					sb.append('{');
+					renderInsn(wrapped, sb);
+					sb.append('}');
+				} else {
+					sb.append("~wrap");
+				}
+			} else {
+				sb.append("arg");
+			}
+		}
+	}
+
+	private String calleeRawId(MethodInfo callee) {
+		return calleeRawIdCache.computeIfAbsent(callee, MethodInfo::getRawFullId);
 	}
 
 	private int addExprOperand(BinExport2.Expression expr) {
@@ -507,7 +599,7 @@ public final class Exporter {
 		// Misses (external callees, the common case) are cached via sentinel -
 		// computeIfAbsent would drop a null mapping and recompute every time.
 		int idx = calleeIdxCache.computeIfAbsent(callee, c -> {
-			Integer i = methodIndexByRawId.get(c.getRawFullId());
+			Integer i = methodIndexByRawId.get(calleeRawId(c));
 			return i != null ? i : NOT_IN_APP;
 		});
 		return idx == NOT_IN_APP ? null : idx;
