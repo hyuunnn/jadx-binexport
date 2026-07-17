@@ -25,9 +25,9 @@ BinDiff는 함수를 구조적으로 매칭한다(콜 그래프 + 함수별 CFG 
 | `ClassNode` | `Module` (클래스별, `Vertex.module_index`로 참조) |
 | `MethodNode` | `CallGraph.Vertex` (주소 오름차순 정렬) |
 | `invoke`(인라인/래핑 포함) | `CallGraph.Edge` + `Instruction.call_target` |
-| `BlockNode` | `BasicBlock` (전역 명령어 인덱스 범위) |
-| `BlockNode.getSuccessors()` | `FlowGraph.Edge` (IF/SWITCH 타입, 지배자 기반 back edge) |
-| `InsnNode` | `Instruction` + `Operand`/`Expression` (레지스터 / 즉값 / 심볼) |
+| `BlockNode` | `BasicBlock` (전역 명령어 인덱스 범위), enter 블록을 맨 앞에 배치 |
+| `BlockNode.getSuccessors()` | `FlowGraph.Edge` (IF true/false는 `IfNode`에서 판정, 지배자 기반 back edge) |
+| `InsnNode` | `Instruction` + `Operand`/`Expression` + 정규 `raw_bytes` |
 | 정렬된 메서드 인덱스 | 합성 `uint64` 주소 `(idx+1)<<20 + seq` |
 
 Dalvik에는 선형 주소 공간이 없으므로, 각 메서드는 메서드 시그니처의 결정적 정렬에서
@@ -90,25 +90,48 @@ APK를 연 뒤 **Plugins → Export to BinExport (.BinExport)** 클릭.
 ### BinDiff에서 비교
 
 BinDiff → **New Diff** → 두 `.BinExport` 파일 선택 → 실행. 매칭/비매칭 함수와
-콜 그래프·플로우 그래프 시각화를 볼 수 있다.
+콜 그래프·플로우 그래프 시각화를 볼 수 있다. CLI로도 가능하다:
+
+```bash
+bindiff app-v1.BinExport app-v2.BinExport --output_dir results/
+```
+
+## 난독화에도 동작한다
+
+이 도구의 핵심 목적은 심볼이 난독화(ProGuard/R8)되어 **이름이 아무 단서가 안 되는**
+두 앱 버전을 diff하는 것이다. BinDiff는 구조(콜 그래프 + CFG)와 함께
+`Instruction.raw_bytes` — 각 명령어를 파일에 독립적으로 정규화해 렌더링한 값(니모닉 +
+operand + 래핑된 invoke) — 으로 매칭하는데, 이 플러그인이 그 `raw_bytes`를 내보내야
+BinDiff의 내용 해시 매처가 동작한다. 한 앱을 **서로 다른 R8 이름 사전으로 두 번**
+난독화해(모든 메서드 이름이 달라짐) R8의 `mapping.txt`를 정답지로 채점한 벤치마크에서
+매칭 정확도는 **96%**였다. 대조 실험으로 `raw_bytes`를 빼자 23%로 무너졌으므로,
+이것은 장식이 아니라 핵심 신호다.
 
 ## 주의
 
 - **양쪽을 반드시 같은 jadx 버전으로 내보낸다.** jadx는 raw smali가 아니라 정규화된
   IR를 내보내고 많은 `invoke`를 operand 트리로 접는다. 니모닉 집합과 폴딩 방식이 jadx
-  버전마다 달라, 버전을 섞으면 매칭 품질이 떨어진다.
+  버전마다 달라, 버전을 섞으면 매칭 품질이 떨어진다. 파일의 `architecture_name`에
+  jadx 버전이 기록되므로(`dalvik-jadx-<버전>`) 버전 불일치를 BinDiff에서 눈으로 확인할 수 있다.
 - **Dalvik(DEX)만 지원.** 네이티브 `lib/*.so`는 ELF/ARM이라 기존 BinExport의 ARM/AArch64
   익스포터로 이미 diff된다 — 이 플러그인 범위 밖이다.
 
 ## 상태
 
-검증됨: `./gradlew build` 및 엔드투엔드 통합 테스트(실제 jadx 모델 → BinExport2 재파싱,
-불변식 검사) 통과.
+**엔드투엔드 검증 완료** (BinDiff 8):
 
-아직 미검증: jadx의 `dex-input` 경로를 통한 실제 APK, 그리고 BinDiff가 산출 파일을
-실제로 받아들이는지(개발 환경에 BinDiff가 없었음). 매핑은 입력에 무관하게(로드 이후의
-jadx 모델을 대상으로) 동작하므로 DEX 경로도 동작할 것으로 예상되나, 실제 APK 스모크
-테스트는 아직 남아 있다.
+- `./gradlew build` + 통합 테스트(실제 jadx 모델 → BinExport2 재파싱, 불변식 검사) 통과.
+- jadx `dex-input` 실제 APK 경로: 1.3 MB APK를 함수 13,226개 / 명령어 90,106개로
+  내보냈고 모든 구조 불변식이 성립.
+- BinDiff 인제스트: 산출 파일이 실제로 로드·diff됨(동일 파일 self-match 13,226/13,226),
+  위의 난독화 벤치마크 96% 정답.
+- 결정성: 같은 입력의 두 export는 (타임스탬프 제외) 바이트 단위로 동일.
+
+실제 APK 경로를 도는 옵트인 스모크 테스트:
+
+```bash
+./gradlew test -Pbinexport.smoke.apk=/path/to/app.apk
+```
 
 ## 개발
 
