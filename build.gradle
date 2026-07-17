@@ -1,0 +1,62 @@
+plugins {
+    id 'java'
+    id 'com.google.protobuf' version '0.9.4'
+    id 'com.gradleup.shadow' version '8.3.5'
+}
+
+group = 'dev.apkdiff'
+version = '0.1.0'
+
+ext {
+    jadxVersion = '1.5.6'
+    protobufVersion = '3.25.5'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Provided by the jadx runtime; must not be bundled.
+    compileOnly "io.github.skylot:jadx-core:${jadxVersion}"
+    compileOnly 'org.jetbrains:annotations:24.1.0'
+
+    // Bundled (shaded + relocated) into the plugin jar.
+    implementation "com.google.protobuf:protobuf-java:${protobufVersion}"
+
+    // Integration test: run the exporter against a real jadx model built from
+    // compiled .class input.
+    testImplementation "io.github.skylot:jadx-core:${jadxVersion}"
+    testImplementation "io.github.skylot:jadx-java-input:${jadxVersion}"
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.2'
+}
+
+test {
+    useJUnitPlatform()
+    testLogging { showStandardStreams = true }
+}
+
+protobuf {
+    protoc {
+        artifact = "com.google.protobuf:protoc:${protobufVersion}"
+    }
+}
+
+// Target Java 11 bytecode so the plugin runs on any jadx-supported JRE (11+),
+// while compiling with whatever (newer) JDK runs Gradle.
+tasks.withType(JavaCompile).configureEach {
+    options.release = 11
+    options.encoding = 'UTF-8'
+}
+
+shadowJar {
+    // Produce a single, self-contained plugin jar: apk-diff-binexport-<ver>.jar
+    archiveClassifier.set('')
+    // Avoid clashing with any protobuf runtime already on the jadx classpath.
+    relocate 'com.google.protobuf', 'dev.apkdiff.shadow.protobuf'
+}
+
+// The plain jar is incomplete (no protobuf runtime); the shadow jar is the artifact.
+tasks.named('jar') { enabled = false }
+tasks.named('build') { dependsOn 'shadowJar' }
