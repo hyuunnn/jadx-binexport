@@ -1,4 +1,9 @@
 .gradle/
 build/
-*.BinExport
 .gjc/
+
+# generated / test fixtures — never commit
+*.BinExport
+*.BinDiff
+*.apk
+*.dex
