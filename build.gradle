@@ -49,6 +49,11 @@ test {
         // A smoke run must actually run - never let the up-to-date check skip it
         // (the APK's content is not a task input, so Gradle can't tell it changed).
         outputs.upToDateWhen { false }
+        // A real APK builds one large in-memory BinExport2 (millions of builder
+        // messages before serialization); the default worker heap OOMs on big
+        // apps. jadx's own CLI/GUI run with a large heap, so this only matches
+        // the runtime the plugin actually ships in.
+        maxHeapSize = '4g'
     }
 }
 
