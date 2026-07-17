@@ -21,6 +21,7 @@ public class BinExportOptions extends BasePluginOptionsBuilder {
 
 	private String output;
 	private String outDir;
+	private String bindiff;
 
 	@Override
 	public void registerOptions() {
@@ -32,6 +33,10 @@ public class BinExportOptions extends BasePluginOptionsBuilder {
 				.description("output directory for <input-basename>.BinExport")
 				.defaultValue("")
 				.setter(v -> outDir = v);
+		strOption(BinExportPlugin.PLUGIN_ID + ".bindiff")
+				.description("path to the bindiff executable (for in-GUI diffing)")
+				.defaultValue("")
+				.setter(v -> bindiff = v);
 	}
 
 	public String getOutput() {
@@ -40,6 +45,10 @@ public class BinExportOptions extends BasePluginOptionsBuilder {
 
 	public String getOutDir() {
 		return firstNonEmpty(outDir, System.getProperty("binexport.outdir"));
+	}
+
+	public String getBindiff() {
+		return firstNonEmpty(bindiff, System.getProperty("binexport.bindiff"));
 	}
 
 	private static String firstNonEmpty(String value, String fallback) {

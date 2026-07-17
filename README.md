@@ -100,19 +100,27 @@ Open BinDiff → **New Diff** → pick the two `.BinExport` files → run. You g
 bindiff app-v1.BinExport app-v2.BinExport --output_dir results/
 ```
 
-### Browse results back in jadx (click-to-navigate)
+### Diff and browse inside jadx (like the IDA BinDiff plugin)
 
-Like the IDA BinDiff plugin, you can browse the match results inside jadx-gui and
-jump straight to a function. With the app open in jadx-gui:
+You don't have to run `bindiff` by hand. With app **A** open in jadx-gui and app
+**B** already exported to `B.BinExport`:
 
-**Plugins → Open BinDiff results (.BinDiff)…** → pick the `.BinDiff` produced above.
+**Plugins → Diff against BinExport (.BinExport)…** → pick `B.BinExport`.
 
-A table lists every matched function that belongs to the open app, sorted by
+The plugin exports A, runs `bindiff` on A vs B, and opens the results in one step.
+A table lists every matched function that belongs to the open app (A), sorted by
 similarity (changed functions first) and colored red→green. **Double-click a row
 (or press Enter) to open that method in jadx.** A filter box narrows the list.
-Matches are linked by name (the exporter writes each method's full signature as
-`mangled_name`), so navigation works even when the addresses are synthetic — just
-load the `.BinDiff` in a jadx session opened on the same app + jadx version.
+
+This needs the `bindiff` executable; if it's not on `PATH`, set its full path in
+the `apk-diff-binexport.bindiff` plugin option.
+
+If you already produced a `.BinDiff` (from the CLI or another run), skip the diff
+step: **Plugins → Open BinDiff results (.BinDiff)…** → pick the `.BinDiff`.
+
+Matches are linked by name (each method's full signature is written as
+`mangled_name`), so navigation works despite the synthetic addresses — just diff
+from / load into a jadx session opened on the same app + jadx version.
 
 ## Works through obfuscation
 

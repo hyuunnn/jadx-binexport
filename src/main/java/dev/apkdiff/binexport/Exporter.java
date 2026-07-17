@@ -74,6 +74,7 @@ public final class Exporter {
 	private final Builder be = BinExport2.newBuilder();
 
 	private final BinExportOptions options;
+	private File explicitOutput;
 
 	private final List<MethodNode> methods = new ArrayList<>();
 	// MethodInfo.getRawFullId() rebuilds its string on every call and is used in
@@ -123,6 +124,13 @@ public final class Exporter {
 		return new Exporter(options).export(decompiler);
 	}
 
+	/** Exports to an explicit file, bypassing option/sysprop path resolution. */
+	public static File runToFile(JadxDecompiler decompiler, File out) {
+		Exporter e = new Exporter(null);
+		e.explicitOutput = out;
+		return e.export(decompiler);
+	}
+
 	/** Shared error contract for the CLI pass and the GUI action. */
 	public static void runLogged(JadxDecompiler decompiler, BinExportOptions options) {
 		try {
@@ -160,7 +168,7 @@ public final class Exporter {
 		buildMeta(decompiler.getArgs());
 
 		// 4. Serialize.
-		File out = resolveOutputFile(decompiler.getArgs());
+		File out = explicitOutput != null ? explicitOutput : resolveOutputFile(decompiler.getArgs());
 		File parent = out.getParentFile();
 		if (parent != null) {
 			parent.mkdirs();

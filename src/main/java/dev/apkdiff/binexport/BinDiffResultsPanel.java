@@ -66,7 +66,47 @@ final class BinDiffResultsPanel {
 		if (chooser.showOpenDialog(gui.getMainFrame()) != JFileChooser.APPROVE_OPTION) {
 			return;
 		}
-		File file = chooser.getSelectedFile();
+		loadAndShow(context, chooser.getSelectedFile());
+	}
+
+	/**
+	 * Menu entry point for the IDA-like flow: pick another app's {@code
+	 * .BinExport}, diff the currently-open app against it via bindiff, and show
+	 * the navigable results.
+	 */
+	static void promptAndDiff(JadxPluginContext context, BinExportOptions options) {
+		JadxGuiContext gui = context.getGuiContext();
+		if (gui == null) {
+			return;
+		}
+		JFileChooser chooser = new JFileChooser();
+		chooser.setDialogTitle("Diff current app against a .BinExport (the OTHER version)");
+		chooser.setFileFilter(new FileNameExtensionFilter("BinExport (*.BinExport)", "BinExport"));
+		if (chooser.showOpenDialog(gui.getMainFrame()) != JFileChooser.APPROVE_OPTION) {
+			return;
+		}
+		File other = chooser.getSelectedFile();
+		new Thread(() -> {
+			try {
+				File binDiff = BinDiffRunner.diff(context.getDecompiler(), other, options);
+				loadAndShow(context, binDiff);
+			} catch (BinDiffRunner.BinDiffNotFound nf) {
+				gui.uiRun(() -> JOptionPane.showMessageDialog(gui.getMainFrame(),
+						nf.getMessage(), "BinDiff not found", JOptionPane.WARNING_MESSAGE));
+			} catch (Throwable t) {
+				LOG.error("[BinExport] diff against {} failed", other, t);
+				gui.uiRun(() -> JOptionPane.showMessageDialog(gui.getMainFrame(),
+						"Diff failed:\n" + t.getMessage(), "BinDiff", JOptionPane.ERROR_MESSAGE));
+			}
+		}, "binexport-diff").start();
+	}
+
+	/** Reads a {@code .BinDiff}, indexes the current app, and shows the table. */
+	static void loadAndShow(JadxPluginContext context, File file) {
+		JadxGuiContext gui = context.getGuiContext();
+		if (gui == null) {
+			return;
+		}
 		// Parse + index off the EDT; the DB read and class walk can be slow.
 		new Thread(() -> {
 			try {
