@@ -109,6 +109,11 @@ Dalvik has no linear address space. Scheme: sort methods by `MethodInfo.getRawFu
 
 `ExporterIntegrationTest` compiles a small class with `ToolProvider` javac, loads it through jadx via **`jadx-java-input`** (compiled `.class` path, not DEX), lets the AfterLoadPass export, then `BinExport2.parseFrom` and asserts invariants (sorted vertices, entry∈blocks, global indices in range, valid instruction ranges, ≥1 call edge, a back edge from the loop, CONDITION_TRUE **and** CONDITION_FALSE edges present, a self edge for the recursive `fact()`, ≥1 instruction with `call_target`). Last run: `vertices=5 edges=3 instructions=37 basicBlocks=32 flowGraphs=5 mnemonics=6 backEdge=true`.
 
+Opt-in tests (skip cleanly when their tool/display is absent):
+- `RealApkSmokeTest` — real DEX path + determinism. Needs a real APK: `./gradlew test -Pbinexport.smoke.apk=/path/app.apk`.
+- `BinDiffNavigationTest` / `BinDiffRunnerTest` — need the `bindiff` CLI (found via PATH / `-Dbinexport.bindiff` / common paths; detected by `--help` OUTPUT since it exits non-zero). They run the real export→bindiff→read-results→resolve-to-MethodNode loop.
+- `BinDiffClickTest` — needs a non-headless display (`-Djava.awt.headless=false`); builds the real results table and dispatches a genuine double-click MouseEvent, asserting navigation targets the right `MethodNode`. Swing can't run headless, hence the split between the Swing shell (`BinDiffResultsPanel`) and its testable core (`BinDiffResults`).
+
 ## Verification status
 
 - **Real APK/DEX path: VERIFIED** (2026-07-18). `RealApkSmokeTest` (opt-in: `./gradlew test -Pbinexport.smoke.apk=/path/app.apk`) ran a real 1.3MB APK through jadx-dex-input 1.5.6: 13,226 vertices / 10,168 call edges / 90,106 instructions / 11,807 flow graphs, all structural invariants held. jadx's own RegionMaker failures on 2 classes exercised the degraded-body path correctly (bodyless vertices + warning).
