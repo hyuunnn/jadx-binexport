@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 260" width="900" height="260" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <defs>
+    <linearGradient id="wm" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#58a6ff"/>
+      <stop offset="1" stop-color="#56d364"/>
+    </linearGradient>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#161b22"/>
+      <stop offset="1" stop-color="#0d1117"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#58a6ff"/>
+      <stop offset="1" stop-color="#3fb950"/>
+    </linearGradient>
+  </defs>
+
+  <!-- icon mark (same as logo.svg), placed left, 220x220 at y=20 -->
+  <g transform="translate(20,20) scale(0.4297)">
+    <rect x="20" y="20" width="472" height="472" rx="116" fill="url(#tile)" stroke="url(#ring)" stroke-width="8"/>
+    <g stroke-width="14" fill="none" stroke-linecap="round">
+      <path d="M186,168 L326,168" stroke="#3fb950"/>
+      <path d="M186,256 L326,256" stroke="#3fb950"/>
+      <path d="M186,344 L326,344" stroke="#f85149"/>
+    </g>
+    <circle cx="186" cy="168" r="34" fill="#0d1117" stroke="#58a6ff" stroke-width="12"/>
+    <circle cx="186" cy="256" r="34" fill="#0d1117" stroke="#58a6ff" stroke-width="12"/>
+    <circle cx="186" cy="344" r="34" fill="#0d1117" stroke="#58a6ff" stroke-width="12"/>
+    <circle cx="326" cy="168" r="34" fill="#0d1117" stroke="#3fb950" stroke-width="12"/>
+    <circle cx="326" cy="256" r="34" fill="#0d1117" stroke="#3fb950" stroke-width="12"/>
+    <circle cx="326" cy="344" r="34" fill="#0d1117" stroke="#f85149" stroke-width="12"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="270" y="140" font-size="68" font-weight="800" fill="url(#wm)">jadx-binexport</text>
+  <text x="273" y="182" font-size="24" font-weight="500" fill="#8b949e">jadx → BinExport · diff APKs in BinDiff</text>
+</svg>

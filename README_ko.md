@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="jadx-binexport 로고" width="150">
+  <img src="assets/logo-wordmark.svg" alt="jadx-binexport" width="460">
 </p>
 
 # jadx-binexport — jadx → BinExport 플러그인
