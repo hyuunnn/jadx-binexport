@@ -1,0 +1,122 @@
+# apk-diff — jadx → BinExport 플러그인
+
+[English README](README.md)
+
+[jadx](https://github.com/skylot/jadx)의 분석 결과(클래스, 메서드, 제어 흐름 그래프,
+콜 그래프)를 [BinDiff](https://www.zynamics.com/bindiff.html)가 사용하는 **BinExport2**
+protobuf 포맷으로 내보내는 jadx 플러그인이다.
+
+즉, IDA Pro / Ghidra / Binary Ninja로 뽑은 네이티브 바이너리를 BinDiff에서 비교하듯이,
+**두 APK의 Dalvik 바이트코드를 BinDiff에서 diff하고 시각화**할 수 있다.
+
+## 왜 만들었나
+
+BinDiff는 함수를 구조적으로 매칭한다(콜 그래프 + 함수별 CFG + 명령어 특징). 그래서
+아키텍처에 크게 얽매이지 않는다. 실제로 BinExport2 포맷 자체가 DEX를 염두에 두고
+설계되어 있다 — `kDex` 아키텍처, Java 클래스를 뜻하는 `Module` 메시지, `Vertex.module_index`가
+이미 존재한다. 한편 jadx는 BinDiff가 필요로 하는 것(메서드, 기본 블록, 지배자 정보, 호출 참조)을
+이미 다 계산하고, 안드로이드/Dalvik 이해도·이름 복원·multidex 처리까지 강하다. 이 플러그인은
+그 사이를 잇는 접착제로, jadx 모델을 `.BinExport`로 직렬화한다.
+
+## 매핑 방식
+
+| jadx | BinExport2 |
+| --- | --- |
+| `ClassNode` | `Module` (클래스별, `Vertex.module_index`로 참조) |
+| `MethodNode` | `CallGraph.Vertex` (주소 오름차순 정렬) |
+| `invoke`(인라인/래핑 포함) | `CallGraph.Edge` + `Instruction.call_target` |
+| `BlockNode` | `BasicBlock` (전역 명령어 인덱스 범위) |
+| `BlockNode.getSuccessors()` | `FlowGraph.Edge` (IF/SWITCH 타입, 지배자 기반 back edge) |
+| `InsnNode` | `Instruction` + `Operand`/`Expression` (레지스터 / 즉값 / 심볼) |
+| 정렬된 메서드 인덱스 | 합성 `uint64` 주소 `(idx+1)<<20 + seq` |
+
+Dalvik에는 선형 주소 공간이 없으므로, 각 메서드는 메서드 시그니처의 결정적 정렬에서
+유도한 안정적인 합성 기준 주소를 받는다. 주소는 *하나의 파일 안에서만* 고유하고
+일관되면 되고(BinDiff는 구조로 매칭한다), 같은 입력을 다시 빌드해도 동일하게 유지된다.
+
+## 요구 사항
+
+- jadx **1.5.6** (플러그인 API). jadx가 지원하는 아무 JRE(Java 11+)에서 동작한다.
+- BinDiff (내보낸 파일을 비교하는 쪽).
+- 빌드용 JDK (11+). Gradle wrapper 포함되어 있다.
+
+## 빌드
+
+```bash
+./gradlew build
+# -> build/libs/apk-diff-binexport-0.1.0.jar
+```
+
+산출물 jar은 자체 완결형이다(protobuf 런타임을 shade + relocate 처리).
+
+## jadx에 설치
+
+```bash
+jadx plugins --install-jar build/libs/apk-diff-binexport-0.1.0.jar
+jadx plugins --list        # "apk-diff-binexport"가 보이면 성공
+```
+
+jadx-gui에서는 *Preferences → Plugins → Install plugin (jar)*.
+
+## 사용법
+
+### CLI (자동)
+
+입력이 로드되면 자동으로 내보낸다:
+
+```bash
+# 비교할 두 버전을 반드시 "같은 jadx 버전"으로 각각 내보낸다.
+jadx -d out_v1 app-v1.apk        # -> out_v1/app-v1.BinExport
+jadx -d out_v2 app-v2.apk        # -> out_v2/app-v2.BinExport
+```
+
+출력 경로를 직접 지정하려면:
+
+```bash
+jadx -d out app.apk -J-Dbinexport.output=/path/app.BinExport
+# 또는 디렉터리:   -J-Dbinexport.outdir=/some/dir
+```
+
+출력 경로 결정 순서(먼저 매치되는 것): `-Dbinexport.output` → `-Dbinexport.outdir`
+→ jadx 출력 디렉터리, 파일명은 `<입력-베이스명>.BinExport`.
+
+### GUI (수동)
+
+APK를 연 뒤 **Plugins → Export to BinExport (.BinExport)** 클릭.
+
+### BinDiff에서 비교
+
+BinDiff → **New Diff** → 두 `.BinExport` 파일 선택 → 실행. 매칭/비매칭 함수와
+콜 그래프·플로우 그래프 시각화를 볼 수 있다.
+
+## 주의
+
+- **양쪽을 반드시 같은 jadx 버전으로 내보낸다.** jadx는 raw smali가 아니라 정규화된
+  IR를 내보내고 많은 `invoke`를 operand 트리로 접는다. 니모닉 집합과 폴딩 방식이 jadx
+  버전마다 달라, 버전을 섞으면 매칭 품질이 떨어진다.
+- **Dalvik(DEX)만 지원.** 네이티브 `lib/*.so`는 ELF/ARM이라 기존 BinExport의 ARM/AArch64
+  익스포터로 이미 diff된다 — 이 플러그인 범위 밖이다.
+
+## 상태
+
+검증됨: `./gradlew build` 및 엔드투엔드 통합 테스트(실제 jadx 모델 → BinExport2 재파싱,
+불변식 검사) 통과.
+
+아직 미검증: jadx의 `dex-input` 경로를 통한 실제 APK, 그리고 BinDiff가 산출 파일을
+실제로 받아들이는지(개발 환경에 BinDiff가 없었음). 매핑은 입력에 무관하게(로드 이후의
+jadx 모델을 대상으로) 동작하므로 DEX 경로도 동작할 것으로 예상되나, 실제 APK 스모크
+테스트는 아직 남아 있다.
+
+## 개발
+
+아키텍처 노트, 어렵게 얻은 jadx 함정(특히: `cls.decompile()`은 CFG를 언로드해 없애버린다 →
+`forceProcess`를 써야 한다), BinExport2 포맷 규칙, 백로그는 [CLAUDE.md](CLAUDE.md) 참고.
+
+```bash
+./gradlew test        # 통합 테스트만 실행
+```
+
+## 라이선스
+
+벤더링된 `src/main/proto/binexport2.proto`는 Apache-2.0 (© Google LLC)이며,
+[google/binexport](https://github.com/google/binexport)에서 그대로 가져왔다.
