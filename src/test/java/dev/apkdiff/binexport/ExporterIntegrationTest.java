@@ -63,8 +63,12 @@ class ExporterIntegrationTest {
 			be = BinExport2.parseFrom(is);
 		}
 
-		// Meta
+		// Meta - architecture carries the jadx version so a version-mismatch
+		// diff is detectable in BinDiff's UI/results.
 		assertNotNull(be.getMetaInformation());
+		assertTrue(be.getMetaInformation().getArchitectureName().startsWith("dalvik-jadx-"),
+				"architecture must embed the jadx version: "
+						+ be.getMetaInformation().getArchitectureName());
 		assertTrue(be.getModuleCount() >= 1, "expected at least one module (class)");
 
 		// Call graph: <init>, fib, caller, helper => >= 4 vertices, sorted by address.

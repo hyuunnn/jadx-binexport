@@ -28,6 +28,7 @@ import com.google.security.zynamics.BinExport.BinExport2.Builder;
 import jadx.api.JadxArgs;
 import jadx.api.JadxDecompiler;
 import jadx.api.plugins.utils.CommonFileUtils;
+import jadx.core.Jadx;
 import jadx.core.dex.info.MethodInfo;
 import jadx.core.dex.instructions.BaseInvokeNode;
 import jadx.core.dex.instructions.IfNode;
@@ -617,10 +618,14 @@ public final class Exporter {
 	private void buildMeta(JadxArgs args) {
 		File input = firstInput(args);
 		String name = input != null ? input.getName() : "app";
+		// Two .BinExport files are only comparable when produced by the same
+		// jadx version (IR normalization/folding differ). Meta is display-only
+		// for BinDiff, so carrying the version in architecture_name surfaces a
+		// mismatch right in the BinDiff UI / results DB.
 		be.getMetaInformationBuilder()
 				.setExecutableName(name)
 				.setExecutableId(sha256(input, name))
-				.setArchitectureName("dalvik")
+				.setArchitectureName("dalvik-jadx-" + Jadx.getVersion())
 				.setTimestamp(System.currentTimeMillis() / 1000);
 	}
 

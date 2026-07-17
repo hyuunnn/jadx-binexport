@@ -114,7 +114,7 @@ Dalvik has no linear address space. Scheme: sort methods by `MethodInfo.getRawFu
 2. Memory: all classes stay loaded (no unload) — fine for small/medium apps, may need streaming for huge multidex (proto side already uses immutable adds, so the builder overhead is gone).
 3. Consider exporting native `lib/*.so` via existing BinExport ARM/AArch64 path for a full "APK diff" (out of scope for this plugin).
 4. CLI still exits 0 when the export fails (the pass logs the error but jadx's decompile result is independent); a strict-mode option could rethrow for CI pipelines.
-5. Record the jadx version in `meta_information` so a version mismatch between two files is detectable.
+5. ~~Record the jadx version in `meta_information`~~ — DONE: `architecture_name` is `dalvik-jadx-<version>` (Meta is display-only for BinDiff, so the mismatch shows up right in its UI/results DB).
 6. ~~string_table/string_reference enrichment~~ — DROPPED for BinDiff: its reader never consumes string references (hardcoded `string_hash_=0` + TODO in `flow_graph.cc`), so this yields zero matching improvement; only worth doing if another BinExport2 consumer needs it. The former "biggest win" here was `raw_bytes`, which is now emitted.
 
 ## Reference URLs
