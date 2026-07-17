@@ -1,4 +1,4 @@
-package dev.apkdiff.binexport;
+package dev.jadxbinexport;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 

@@ -1,4 +1,4 @@
-package dev.apkdiff.binexport;
+package dev.jadxbinexport;
 
 import jadx.api.plugins.options.impl.BasePluginOptionsBuilder;
 
@@ -7,8 +7,8 @@ import jadx.api.plugins.options.impl.BasePluginOptionsBuilder;
  * the GUI preferences dialog:
  *
  * <ul>
- *   <li>{@code apk-diff-binexport.output} - explicit output file path</li>
- *   <li>{@code apk-diff-binexport.outdir} - output directory for
+ *   <li>{@code jadx-binexport.output} - explicit output file path</li>
+ *   <li>{@code jadx-binexport.outdir} - output directory for
  *       {@code <input-basename>.BinExport}</li>
  * </ul>
  *

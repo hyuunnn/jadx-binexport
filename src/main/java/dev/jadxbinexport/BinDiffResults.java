@@ -1,4 +1,4 @@
-package dev.apkdiff.binexport;
+package dev.jadxbinexport;
 
 import java.io.File;
 import java.sql.Connection;

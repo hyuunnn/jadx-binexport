@@ -1,4 +1,4 @@
-package dev.apkdiff.binexport;
+package dev.jadxbinexport;
 
 import java.io.File;
 import java.nio.file.Files;
@@ -15,7 +15,7 @@ import jadx.api.JadxDecompiler;
  *
  * <p>The BinDiff matching engine itself is not reimplemented - we shell out to
  * the {@code bindiff} executable, which must be installed (configurable via the
- * {@code apk-diff-binexport.bindiff} option).
+ * {@code jadx-binexport.bindiff} option).
  */
 final class BinDiffRunner {
 
@@ -39,10 +39,10 @@ final class BinDiffRunner {
 		if (bindiff == null) {
 			throw new BinDiffNotFound(
 					"bindiff executable not found. Install BinDiff, or set the\n"
-							+ "'apk-diff-binexport.bindiff' plugin option to its full path.");
+							+ "'jadx-binexport.bindiff' plugin option to its full path.");
 		}
 
-		Path work = Files.createTempDirectory("apkdiff-bindiff");
+		Path work = Files.createTempDirectory("jadx-binexport");
 		File current = new File(work.toFile(), "current.BinExport");
 		Exporter.runToFile(decompiler, current);
 

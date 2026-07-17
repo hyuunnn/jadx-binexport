@@ -4,7 +4,7 @@ plugins {
     id 'com.gradleup.shadow' version '8.3.5'
 }
 
-group = 'dev.apkdiff'
+group = 'dev.jadxbinexport'
 version = '0.1.0'
 
 ext {
@@ -66,10 +66,10 @@ tasks.withType(JavaCompile).configureEach {
 }
 
 shadowJar {
-    // Produce a single, self-contained plugin jar: apk-diff-binexport-<ver>.jar
+    // Produce a single, self-contained plugin jar: jadx-binexport-<ver>.jar
     archiveClassifier.set('')
     // Avoid clashing with any protobuf runtime already on the jadx classpath.
-    relocate 'com.google.protobuf', 'dev.apkdiff.shadow.protobuf'
+    relocate 'com.google.protobuf', 'dev.jadxbinexport.shadow.protobuf'
 }
 
 // The plain jar is incomplete (no protobuf runtime); the shadow jar is the artifact.

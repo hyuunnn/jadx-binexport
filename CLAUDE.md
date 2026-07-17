@@ -1,4 +1,4 @@
-# CLAUDE.md — apk-diff / jadx → BinExport plugin
+# CLAUDE.md — jadx-binexport / jadx → BinExport plugin
 
 Working notes for continuing development. Reads best top-to-bottom once, then as a reference.
 
@@ -15,7 +15,7 @@ serialize it. The proto was designed with DEX in mind (`Architecture::kDex`,
 
 ```
 src/main/proto/binexport2.proto                     # vendored verbatim from google/binexport
-src/main/java/dev/apkdiff/binexport/
+src/main/java/dev/jadxbinexport/
   BinExportPlugin.java     # JadxPlugin. CLI/library => auto (SimpleAfterLoadPass); GUI => 2 menu actions (Export / Open BinExport-to-diff)
   BinExportOptions.java    # per-instance plugin options (output/outdir), sysprop fallback
   Exporter.java            # THE mapping logic (jadx model -> BinExport2)
@@ -26,7 +26,7 @@ src/main/resources/META-INF/services/jadx.api.plugins.JadxPlugin   # plugin regi
 src/test/java/.../ExporterIntegrationTest.java      # real jadx E2E test
 ```
 
-Plugin id: `apk-diff-binexport`. Output jar: `build/libs/apk-diff-binexport-<ver>.jar`.
+Plugin id: `jadx-binexport`. Output jar: `build/libs/jadx-binexport-<ver>.jar`.
 
 ## Build / test / verify
 
@@ -37,17 +37,17 @@ Plugin id: `apk-diff-binexport`. Output jar: `build/libs/apk-diff-binexport-<ver
 
 - JDK 21 present; bytecode target is **Java 11** (`options.release = 11`) so the jar runs on any jadx-supported JRE.
 - Versions: jadx **1.5.6**, protobuf-java/protoc **3.25.5**, shadow `com.gradleup.shadow` **8.3.5**, protobuf-gradle-plugin **0.9.4**, gradle wrapper **8.10.2** (committed; just use `./gradlew`).
-- `jadx-core` is `compileOnly` (provided by jadx at runtime). protobuf is `implementation` and **shaded + relocated** `com.google.protobuf` -> `dev.apkdiff.shadow.protobuf` to avoid clashing with jadx's own protobuf. The plain `jar` task is disabled; the shadow jar is the artifact.
+- `jadx-core` is `compileOnly` (provided by jadx at runtime). protobuf is `implementation` and **shaded + relocated** `com.google.protobuf` -> `dev.jadxbinexport.shadow.protobuf` to avoid clashing with jadx's own protobuf. The plain `jar` task is disabled; the shadow jar is the artifact.
 - Generated proto entry class: `com.google.security.zynamics.BinExport.BinExport2` (from the proto's `java_package` + `java_outer_classname`; NOT relocated).
 
 ## Install / run
 
 ```bash
-jadx plugins --install-jar build/libs/apk-diff-binexport-0.1.0.jar
+jadx plugins --install-jar build/libs/jadx-binexport-0.1.0.jar
 jadx -d out_v1 app-v1.apk        # -> out_v1/app-v1.BinExport
 jadx -d out_v2 app-v2.apk        # -> out_v2/app-v2.BinExport
 ```
-Output path resolution (first wins): plugin option `apk-diff-binexport.output` (legacy `-Dbinexport.output`) → `apk-diff-binexport.outdir` (legacy `-Dbinexport.outdir`) → jadx out dir. Existing files are overwritten with a log warning. GUI: `Plugins → Export to BinExport`.
+Output path resolution (first wins): plugin option `jadx-binexport.output` (legacy `-Dbinexport.output`) → `jadx-binexport.outdir` (legacy `-Dbinexport.outdir`) → jadx out dir. Existing files are overwritten with a log warning. GUI: `Plugins → Export to BinExport`.
 
 ## GOTCHAS (hard-won — read before touching Exporter)
 
@@ -73,11 +73,11 @@ Output path resolution (first wins): plugin option `apk-diff-binexport.output` (
 
 8. **Synthetic `raw_bytes` are load-bearing for obfuscated diffs.** We emit a canonical text rendering of each insn tree (mnemonic, callee id, regs, literals, wrapped insns) as `raw_bytes`. BinDiff SDBM-hashes these into its function/basic-block "hash matching" steps — its two highest-confidence matchers. With empty bytes every hash is 0 and those steps can never match. On same-name inputs the effect is small (name matching runs first), but when ProGuard/R8 renames symbols between versions — the primary use case — content hashes become the top signal. Rendering must stay deterministic and file-independent (no operand/expression INDICES, only content).
 
-8a. **In-GUI diffing (IDA-like), the second GUI menu action.** A diff is always made from two `.BinExport`s; jadx already holds one (the open app), so the user only opens the OTHER side's export. "Open BinExport (.BinExport)…" is the one-step flow: `BinDiffRunner.diff` exports the current app to a temp file (`Exporter.runToFile`), shells out to the `bindiff` executable (found via the `apk-diff-binexport.bindiff` option / PATH / common paths; detected by `--help` OUTPUT since it exits non-zero), and feeds the produced `.BinDiff` straight into the results table via `BinDiffResultsPanel.loadAndShow`. The matching engine is bindiff itself — we never reimplement it. Deliberately there is **no** "open a raw `.BinExport` viewer" (it carries no source) and **no** "open a pre-made `.BinDiff`" action — the diff is regenerated from the two exports on demand, which subsumes it (the only thing a standalone `.BinDiff` opener would add is browsing results without bindiff installed, judged not worth a separate action). `loadAndShow` is still the shared reader: it parses the produced `.BinDiff` and shows the navigable table.
+8a. **In-GUI diffing (IDA-like), the second GUI menu action.** A diff is always made from two `.BinExport`s; jadx already holds one (the open app), so the user only opens the OTHER side's export. "Open BinExport (.BinExport)…" is the one-step flow: `BinDiffRunner.diff` exports the current app to a temp file (`Exporter.runToFile`), shells out to the `bindiff` executable (found via the `jadx-binexport.bindiff` option / PATH / common paths; detected by `--help` OUTPUT since it exits non-zero), and feeds the produced `.BinDiff` straight into the results table via `BinDiffResultsPanel.loadAndShow`. The matching engine is bindiff itself — we never reimplement it. Deliberately there is **no** "open a raw `.BinExport` viewer" (it carries no source) and **no** "open a pre-made `.BinDiff`" action — the diff is regenerated from the two exports on demand, which subsumes it (the only thing a standalone `.BinDiff` opener would add is browsing results without bindiff installed, judged not worth a separate action). `loadAndShow` is still the shared reader: it parses the produced `.BinDiff` and shows the navigable table.
 
 9. **Results table + navigation.** `loadAndShow` reads the `.BinDiff` and shows a navigable table; double-click => `JadxGuiContext.open(methodNode)` jumps to the method. Key points: (a) `.BinDiff` is a **SQLite** file — its `function` table has `name1/name2/similarity/confidence`, and `name1/name2` are exactly our `mangled_name` (`MethodInfo.getRawFullId()`), so navigation is **by name, not by the synthetic address**. (b) `BinDiffResults.methodIndex` MUST enumerate methods the SAME way `Exporter` does (`getRoot().getClasses()` + inner/inlined, includes `<init>`) — using the API-level `JavaClass.getMethods()` drops constructors and misses matches. (c) `MethodNode implements ICodeNode extends ICodeNodeRef`, so it is passed straight to `open()`. (d) SQLite via `org.xerial:sqlite-jdbc`, **bundled but NOT relocated** (jadx has no SQLite so no clash; relocating `org.sqlite` breaks its native-lib resource lookup). Use `SQLiteDataSource` (not `DriverManager`) to dodge the child-classloader SPI problem in the plugin classloader. Testable core (`BinDiffResults`) is separate from the Swing shell (`BinDiffResultsPanel`) because Swing can't instantiate headless.
 
-10. **Sysprop passing on the jadx CLI.** jadx has NO `-J` JVM-arg passthrough (unknown options become input files via JCommander's `acceptUnknownOptions`). Legacy sysprops must go through `JADX_OPTS`/`JAVA_OPTS` env vars; the plugin options (`-Papk-diff-binexport.output=...`) are the primary interface. jadx calls `setOptions` during `registerOptions()` in every mode (CLI/GUI/library), and `BasePluginOptionsBuilder` invokes setters with `defaultValue` for absent keys.
+10. **Sysprop passing on the jadx CLI.** jadx has NO `-J` JVM-arg passthrough (unknown options become input files via JCommander's `acceptUnknownOptions`). Legacy sysprops must go through `JADX_OPTS`/`JAVA_OPTS` env vars; the plugin options (`-Pjadx-binexport.output=...`) are the primary interface. jadx calls `setOptions` during `registerOptions()` in every mode (CLI/GUI/library), and `BasePluginOptionsBuilder` invokes setters with `defaultValue` for absent keys.
 
 ## BinExport2 format rules (from the canonical reference)
 

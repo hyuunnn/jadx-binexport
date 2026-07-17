@@ -1,4 +1,4 @@
-package dev.apkdiff.binexport;
+package dev.jadxbinexport;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -26,9 +26,9 @@ import jadx.api.plugins.pass.impl.SimpleAfterLoadPass;
  *
  * <p>Output path resolution (first match wins):
  * <ol>
- *   <li>plugin option {@code apk-diff-binexport.output} (or legacy
+ *   <li>plugin option {@code jadx-binexport.output} (or legacy
  *       {@code -Dbinexport.output=/path/to/out.BinExport})</li>
- *   <li>plugin option {@code apk-diff-binexport.outdir} (or legacy
+ *   <li>plugin option {@code jadx-binexport.outdir} (or legacy
  *       {@code -Dbinexport.outdir=/dir}) + {@code <input-basename>.BinExport}</li>
  *   <li>jadx output dir + {@code <input-basename>.BinExport}</li>
  * </ol>
@@ -37,7 +37,7 @@ public class BinExportPlugin implements JadxPlugin {
 
 	private static final Logger LOG = LoggerFactory.getLogger(BinExportPlugin.class);
 
-	public static final String PLUGIN_ID = "apk-diff-binexport";
+	public static final String PLUGIN_ID = "jadx-binexport";
 
 	@Override
 	public JadxPluginInfo getPluginInfo() {

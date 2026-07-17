@@ -1,4 +1,4 @@
-# apk-diff — jadx → BinExport plugin
+# jadx-binexport — jadx → BinExport plugin
 
 [한국어 README](README_ko.md)
 
@@ -46,7 +46,7 @@ structurally), and stay stable across rebuilds of the same input.
 
 ```bash
 ./gradlew build
-# -> build/libs/apk-diff-binexport-0.1.0.jar
+# -> build/libs/jadx-binexport-0.1.0.jar
 ```
 
 The jar is self-contained (protobuf runtime is shaded and relocated).
@@ -54,8 +54,8 @@ The jar is self-contained (protobuf runtime is shaded and relocated).
 ## Install into jadx
 
 ```bash
-jadx plugins --install-jar build/libs/apk-diff-binexport-0.1.0.jar
-jadx plugins --list        # "apk-diff-binexport" should be listed
+jadx plugins --install-jar build/libs/jadx-binexport-0.1.0.jar
+jadx plugins --list        # "jadx-binexport" should be listed
 ```
 
 In jadx-gui: *Preferences → Plugins → Install plugin (jar)*.
@@ -76,8 +76,8 @@ Override the output path if needed (plugin options, also visible in
 `jadx plugins` and the GUI preferences):
 
 ```bash
-jadx -d out app.apk -Papk-diff-binexport.output=/path/app.BinExport
-# or a directory:  -Papk-diff-binexport.outdir=/some/dir
+jadx -d out app.apk -Pjadx-binexport.output=/path/app.BinExport
+# or a directory:  -Pjadx-binexport.outdir=/some/dir
 # legacy system properties still work (jadx has no -J passthrough, use env vars):
 #   JADX_OPTS="-Dbinexport.output=/path/app.BinExport" jadx -d out app.apk
 ```
@@ -115,7 +115,7 @@ similarity (changed functions first) and colored red→green. **Double-click a r
 (or press Enter) to open that method in jadx.** A filter box narrows the list.
 
 This needs the `bindiff` executable; if it's not on `PATH`, set its full path in
-the `apk-diff-binexport.bindiff` plugin option.
+the `jadx-binexport.bindiff` plugin option.
 
 Matches are linked by name (each method's full signature is written as
 `mangled_name`), so navigation works despite the synthetic addresses — just diff
