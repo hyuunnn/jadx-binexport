@@ -7,8 +7,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Arrays;
-import java.util.List;
+import java.util.function.Predicate;
 
 import javax.tools.JavaCompiler;
 import javax.tools.ToolProvider;
@@ -38,6 +37,7 @@ class ExporterIntegrationTest {
 			+ "  }\n"
 			+ "  public int caller(int x) { return fib(x) + helper(x); }\n"
 			+ "  public int helper(int x) { return x * 2; }\n"
+			+ "  public long fact(long n) { return n < 2 ? 1 : n * fact(n - 1); }\n"
 			+ "}\n";
 
 	@Test
@@ -108,9 +108,25 @@ class ExporterIntegrationTest {
 		}
 
 		// The for-loop in fib() should surface at least one back edge somewhere.
-		boolean anyBackEdge = be.getFlowGraphList().stream()
-				.flatMap(fg -> fg.getEdgeList().stream())
-				.anyMatch(BinExport2.FlowGraph.Edge::getIsBackEdge);
+		boolean anyBackEdge = anyFlowEdge(be, BinExport2.FlowGraph.Edge::getIsBackEdge);
+		assertTrue(anyBackEdge, "expected a back edge from the loop in fib()");
+
+		// The if-branches in fib()/fact() must be labeled from the IfNode's
+		// then/else blocks (successor order alone is unreliable in jadx).
+		assertTrue(anyFlowEdge(be, e -> e.getType() == BinExport2.FlowGraph.Edge.Type.CONDITION_TRUE)
+						&& anyFlowEdge(be, e -> e.getType() == BinExport2.FlowGraph.Edge.Type.CONDITION_FALSE),
+				"expected CONDITION_TRUE and CONDITION_FALSE edges");
+
+		// fact() is self-recursive: the call graph must keep the self edge.
+		boolean selfEdge = cg.getEdgeList().stream()
+				.anyMatch(e -> e.getSourceVertexIndex() == e.getTargetVertexIndex());
+		assertTrue(selfEdge, "expected a self edge for the recursive fact()");
+
+		// Calls folded into operand trees still carry call_target.
+		boolean anyCallTarget = be.getInstructionList().stream()
+				.anyMatch(i -> i.getCallTargetCount() > 0);
+		assertTrue(anyCallTarget, "expected at least one instruction with call_target");
+
 		System.out.println("[test] vertices=" + cg.getVertexCount()
 				+ " edges=" + cg.getEdgeCount()
 				+ " instructions=" + be.getInstructionCount()
@@ -118,6 +134,12 @@ class ExporterIntegrationTest {
 				+ " flowGraphs=" + be.getFlowGraphCount()
 				+ " mnemonics=" + be.getMnemonicCount()
 				+ " backEdge=" + anyBackEdge);
+	}
+
+	private static boolean anyFlowEdge(BinExport2 be, Predicate<BinExport2.FlowGraph.Edge> pred) {
+		return be.getFlowGraphList().stream()
+				.flatMap(fg -> fg.getEdgeList().stream())
+				.anyMatch(pred);
 	}
 
 	private static Path compileSample(Path tmp) throws IOException {
@@ -128,19 +150,8 @@ class ExporterIntegrationTest {
 
 		JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
 		assertNotNull(compiler, "JDK (not JRE) required to run this test");
-		List<String> opts = Arrays.asList("-d", classesDir.toString(), "-g");
-		int rc = compiler.run(null, null, null,
-				concat(opts, src.toString()));
+		int rc = compiler.run(null, null, null, "-d", classesDir.toString(), "-g", src.toString());
 		assertTrue(rc == 0, "javac failed rc=" + rc);
 		return classesDir;
-	}
-
-	private static String[] concat(List<String> opts, String last) {
-		String[] arr = new String[opts.size() + 1];
-		for (int i = 0; i < opts.size(); i++) {
-			arr[i] = opts.get(i);
-		}
-		arr[opts.size()] = last;
-		return arr;
 	}
 }

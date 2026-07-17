@@ -72,15 +72,20 @@ jadx -d out_v1 app-v1.apk        # -> out_v1/app-v1.BinExport
 jadx -d out_v2 app-v2.apk        # -> out_v2/app-v2.BinExport
 ```
 
-Override the output path if needed:
+Override the output path if needed (plugin options, also visible in
+`jadx plugins` and the GUI preferences):
 
 ```bash
-jadx -d out app.apk -J-Dbinexport.output=/path/app.BinExport
-# or a directory:  -J-Dbinexport.outdir=/some/dir
+jadx -d out app.apk -Papk-diff-binexport.output=/path/app.BinExport
+# or a directory:  -Papk-diff-binexport.outdir=/some/dir
+# legacy system properties still work (jadx has no -J passthrough, use env vars):
+#   JADX_OPTS="-Dbinexport.output=/path/app.BinExport" jadx -d out app.apk
 ```
 
-Output path resolution (first match wins): `-Dbinexport.output` → `-Dbinexport.outdir`
-→ jadx output dir, with filename `<input-basename>.BinExport`.
+Output path resolution (first match wins): `output` option → `outdir` option
+→ jadx output dir, with filename `<input-basename>.BinExport`. When exporting two
+versions with the same file name, use distinct paths — an existing file is
+overwritten (with a warning in the log).
 
 ### GUI (on demand)
 

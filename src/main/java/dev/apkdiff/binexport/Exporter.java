@@ -2,12 +2,14 @@ package dev.apkdiff.binexport;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
@@ -16,14 +18,18 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.google.security.zynamics.BinExport.BinExport2;
 import com.google.security.zynamics.BinExport.BinExport2.Builder;
 
 import jadx.api.JadxArgs;
 import jadx.api.JadxDecompiler;
-import jadx.api.JavaClass;
+import jadx.api.plugins.utils.CommonFileUtils;
 import jadx.core.dex.info.MethodInfo;
 import jadx.core.dex.instructions.BaseInvokeNode;
+import jadx.core.dex.instructions.IfNode;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.LiteralArg;
@@ -45,43 +51,95 @@ import jadx.core.dex.nodes.MethodNode;
  */
 public final class Exporter {
 
+	private static final Logger LOG = LoggerFactory.getLogger(Exporter.class);
+
 	/** Room for up to 2^20 (~1M) instructions per method before addresses collide. */
 	private static final long METHOD_ADDR_SHIFT = 20;
 	private static final long METHOD_ADDR_STRIDE = 1L << METHOD_ADDR_SHIFT;
 
 	private static final String NOP = "nop";
 
+	/** InsnType is a small fixed enum; derive each mnemonic string exactly once. */
+	private static final Map<InsnType, String> MNEMONIC_BY_TYPE = buildMnemonicTable();
+
 	private final Builder be = BinExport2.newBuilder();
 
-	private final List<MethodNode> methods = new ArrayList<>();
-	private final Map<String, Integer> methodIndexByRawId = new HashMap<>();
+	private final BinExportOptions options;
 
-	// De-dup tables (mirrors BinExport's own de-duplication scheme).
-	private final Map<BinExport2.Expression, Integer> exprIdx = new HashMap<>();
-	private final Map<BinExport2.Operand, Integer> operandIdx = new HashMap<>();
+	private final List<MethodNode> methods = new ArrayList<>();
+	// MethodInfo.getRawFullId() rebuilds its string on every call and is used in
+	// sorting, index lookups and naming, so cache it per method.
+	private final Map<MethodNode, String> rawIdCache = new IdentityHashMap<>();
+	private final Map<String, Integer> methodIndexByRawId = new HashMap<>();
+	// Top-level classes whose forceProcess failed: their IR may be partially
+	// transformed, so their methods are exported as call-graph vertices only.
+	private final Set<ClassNode> processFailed = Collections.newSetFromMap(new IdentityHashMap<>());
+	// Resolved once, shared by the mnemonic, body and call-graph passes.
+	private final List<List<BlockNode>> blocksByMethod = new ArrayList<>();
+	// Callees per method, collected while emitting instructions (deduped,
+	// wrapped invokes included, self-recursion kept).
+	private final List<Set<Integer>> calleesByMethod = new ArrayList<>();
+
+	// jadx interns MethodInfo, so callee resolution and callee symbol operands
+	// are cached by identity - getRawFullId() rebuilds its string per call, and
+	// external (framework) callees would otherwise rebuild it on every invoke.
+	private static final int NOT_IN_APP = -1;
+	private final Map<MethodInfo, Integer> calleeIdxCache = new IdentityHashMap<>();
+	private final Map<MethodInfo, Integer> calleeOperandIdx = new IdentityHashMap<>();
+
+	// Operand de-dup keyed by the primitive that fully determines the operand
+	// (every operand here is a single expression), so the hit path allocates no
+	// throwaway proto messages. Same result as BinExport's proto-keyed scheme.
+	private final Map<Long, Integer> immOperandIdx = new HashMap<>();
+	private final Map<Integer, Integer> regOperandIdx = new HashMap<>();
+	private final Map<String, Integer> symOperandIdx = new HashMap<>();
 	private final Map<String, Integer> mnemonicIdx = new HashMap<>();
 	private final Map<String, Integer> moduleIdx = new HashMap<>();
 
-	private Exporter() {
+	private Exporter(BinExportOptions options) {
+		// A fresh options instance resolves everything from the legacy system
+		// properties, so library callers without registered options still work.
+		this.options = options != null ? options : new BinExportOptions();
 	}
 
 	/** Entry point: build and write the .BinExport file, returning its path. */
 	public static File run(JadxDecompiler decompiler) {
-		return new Exporter().export(decompiler);
+		return run(decompiler, null);
+	}
+
+	public static File run(JadxDecompiler decompiler, BinExportOptions options) {
+		return new Exporter(options).export(decompiler);
+	}
+
+	/** Shared error contract for the CLI pass and the GUI action. */
+	public static void runLogged(JadxDecompiler decompiler, BinExportOptions options) {
+		try {
+			run(decompiler, options);
+		} catch (Throwable t) {
+			LOG.error("[BinExport] export failed", t);
+		}
 	}
 
 	private File export(JadxDecompiler decompiler) {
-		// 1. Force decompilation and collect every method (top-level + nested).
+		// 1. Force decompilation and collect every method. getRoot().getClasses()
+		// enumerates the full model; decompiler.getClasses() would silently drop
+		// classes flagged DONT_GENERATE (deduplicated multidex entries, synthetic
+		// holders), losing their call-graph vertices.
 		Set<ClassNode> visited = Collections.newSetFromMap(new IdentityHashMap<>());
-		for (JavaClass jc : decompiler.getClasses()) {
-			collect(jc.getClassNode(), visited);
+		for (ClassNode cls : decompiler.getRoot().getClasses()) {
+			collect(cls, visited);
 		}
 
 		// 2. Deterministic method ordering => stable synthetic addresses.
-		methods.sort(Comparator.comparing(m -> m.getMethodInfo().getRawFullId()));
+		methods.sort(Comparator.comparing(this::rawId));
 		for (int i = 0; i < methods.size(); i++) {
-			methodIndexByRawId.put(methods.get(i).getMethodInfo().getRawFullId(), i);
+			String id = rawId(methods.get(i));
+			Integer prev = methodIndexByRawId.putIfAbsent(id, i);
+			if (prev != null) {
+				LOG.warn("[BinExport] duplicate method id '{}'; calls resolve to its first copy", id);
+			}
 		}
+		resolveBodies();
 
 		// 3. Global tables and graphs (order matters for index bookkeeping).
 		buildMnemonics();
@@ -95,13 +153,20 @@ public final class Exporter {
 		if (parent != null) {
 			parent.mkdirs();
 		}
+		if (out.exists()) {
+			LOG.warn("[BinExport] overwriting existing {}", out.getAbsolutePath());
+		}
 		try (OutputStream os = Files.newOutputStream(out.toPath())) {
 			be.build().writeTo(os);
 		} catch (IOException e) {
 			throw new RuntimeException("BinExport write failed: " + out, e);
 		}
-		System.out.println("[BinExport] wrote " + methods.size() + " methods, "
-				+ be.getInstructionCount() + " instructions to " + out.getAbsolutePath());
+		if (!processFailed.isEmpty()) {
+			LOG.warn("[BinExport] {} top-level class(es) failed to process; their methods were exported without bodies",
+					processFailed.size());
+		}
+		LOG.info("[BinExport] wrote {} methods, {} instructions to {}",
+				methods.size(), be.getInstructionCount(), out.getAbsolutePath());
 		return out;
 	}
 
@@ -115,7 +180,10 @@ public final class Exporter {
 			// the class right after codegen, discarding the basic blocks we need.
 			cls.root().getProcessClasses().forceProcess(cls);
 		} catch (Throwable t) {
-			System.err.println("[BinExport] process failed for " + cls + ": " + t);
+			ClassNode top = cls.getTopParentClass();
+			if (processFailed.add(top)) {
+				LOG.warn("[BinExport] process failed for {}; exporting its methods without bodies", top, t);
+			}
 		}
 		methods.addAll(cls.getMethods());
 		for (ClassNode inner : cls.getInnerClasses()) {
@@ -126,12 +194,58 @@ public final class Exporter {
 		}
 	}
 
+	// --- Body resolution -----------------------------------------------------
+
+	/**
+	 * Resolves, once, the block list each method exports with. Empty for no-code
+	 * methods, methods of classes whose processing failed (partially transformed
+	 * IR would export misleading bodies), and methods whose emitted instruction
+	 * count would spill past the per-method address stride (addresses would stop
+	 * being unique within the file).
+	 */
+	private void resolveBodies() {
+		for (MethodNode mth : methods) {
+			blocksByMethod.add(resolveBlocks(mth));
+			calleesByMethod.add(new LinkedHashSet<>());
+		}
+	}
+
+	private List<BlockNode> resolveBlocks(MethodNode mth) {
+		if (processFailed.contains(mth.getParentClass().getTopParentClass())) {
+			return Collections.emptyList();
+		}
+		List<BlockNode> blocks = rawBlocks(mth);
+		long emitted = 0;
+		for (BlockNode b : blocks) {
+			emitted += Math.max(1, b.getInstructions().size());
+		}
+		if (emitted >= METHOD_ADDR_STRIDE) {
+			LOG.warn("[BinExport] method {} emits {} instructions, exceeding the 2^{} per-method address space;"
+					+ " exported without body", rawId(mth), emitted, METHOD_ADDR_SHIFT);
+			return Collections.emptyList();
+		}
+		return blocks;
+	}
+
+	/** Whatever blocks the jadx model has, without the body-export filters. */
+	private static List<BlockNode> rawBlocks(MethodNode mth) {
+		try {
+			if (mth.isNoCode()) {
+				return Collections.emptyList();
+			}
+			List<BlockNode> blocks = mth.getBasicBlocks();
+			return blocks == null ? Collections.emptyList() : blocks;
+		} catch (Throwable t) {
+			return Collections.emptyList();
+		}
+	}
+
 	// --- Mnemonics -----------------------------------------------------------
 
 	private void buildMnemonics() {
 		Map<String, Integer> hist = new HashMap<>();
-		for (MethodNode mth : methods) {
-			for (BlockNode b : safeBlocks(mth)) {
+		for (List<BlockNode> blocks : blocksByMethod) {
+			for (BlockNode b : blocks) {
 				List<InsnNode> insns = b.getInstructions();
 				if (insns.isEmpty()) {
 					hist.merge(NOP, 1, Integer::sum);
@@ -162,37 +276,37 @@ public final class Exporter {
 	private void buildBodies() {
 		for (int mi = 0; mi < methods.size(); mi++) {
 			MethodNode mth = methods.get(mi);
-			List<BlockNode> blocks = safeBlocks(mth);
+			List<BlockNode> blocks = blocksByMethod.get(mi);
 			if (blocks.isEmpty()) {
 				continue; // no body => call graph vertex only, no flow graph
 			}
-			long base = (long) (mi + 1) * METHOD_ADDR_STRIDE;
+			long base = methodAddress(mi);
 			long seq = 0;
+			Set<Integer> methodCallees = calleesByMethod.get(mi);
 			Map<BlockNode, Integer> blockGlobalIdx = new IdentityHashMap<>();
 
 			for (BlockNode b : blocks) {
 				int firstInsn = be.getInstructionCount();
 				List<InsnNode> insns = b.getInstructions();
 				if (insns.isEmpty()) {
-					emitInstruction(null, base + seq++);
+					emitInstruction(null, base + seq++, methodCallees);
 				} else {
 					for (InsnNode insn : insns) {
-						emitInstruction(insn, base + seq++);
+						emitInstruction(insn, base + seq++, methodCallees);
 					}
 				}
 				int endExclusive = be.getInstructionCount();
 
-				int bbGlobal = be.getBasicBlockCount();
-				BinExport2.BasicBlock.Builder bb = be.addBasicBlockBuilder();
 				BinExport2.BasicBlock.IndexRange.Builder range =
-						bb.addInstructionIndexBuilder().setBeginIndex(firstInsn);
+						BinExport2.BasicBlock.IndexRange.newBuilder().setBeginIndex(firstInsn);
 				if (endExclusive != firstInsn + 1) {
 					range.setEndIndex(endExclusive);
 				}
-				blockGlobalIdx.put(b, bbGlobal);
+				blockGlobalIdx.put(b, be.getBasicBlockCount());
+				be.addBasicBlock(BinExport2.BasicBlock.newBuilder().addInstructionIndex(range).build());
 			}
 
-			BinExport2.FlowGraph.Builder fg = be.addFlowGraphBuilder();
+			BinExport2.FlowGraph.Builder fg = BinExport2.FlowGraph.newBuilder();
 			BlockNode entry = mth.getEnterBlock();
 			Integer entryIdx = entry != null ? blockGlobalIdx.get(entry) : null;
 			if (entryIdx == null) {
@@ -204,48 +318,56 @@ public final class Exporter {
 				int src = blockGlobalIdx.get(b);
 				fg.addBasicBlockIndex(src);
 				List<BlockNode> succs = b.getSuccessors();
-				InsnType lastType = lastType(b);
-				for (int si = 0; si < succs.size(); si++) {
-					Integer dst = blockGlobalIdx.get(succs.get(si));
+				InsnNode last = lastInsn(b);
+				for (BlockNode succ : succs) {
+					Integer dst = blockGlobalIdx.get(succ);
 					if (dst == null) {
 						continue;
 					}
-					BinExport2.FlowGraph.Edge.Builder edge = fg.addEdgeBuilder()
+					BinExport2.FlowGraph.Edge.Builder edge = BinExport2.FlowGraph.Edge.newBuilder()
 							.setSourceBasicBlockIndex(src)
 							.setTargetBasicBlockIndex(dst)
-							.setType(edgeType(lastType, succs.size(), si));
-					if (isBackEdge(b, succs.get(si))) {
+							.setType(edgeType(last, succs.size(), succ));
+					if (isBackEdge(b, succ)) {
 						edge.setIsBackEdge(true);
 					}
+					fg.addEdge(edge.build());
 				}
 			}
+			be.addFlowGraph(fg.build());
 		}
 	}
 
-	private void emitInstruction(InsnNode insn, long address) {
-		BinExport2.Instruction.Builder ib = be.addInstructionBuilder();
+	private void emitInstruction(InsnNode insn, long address, Set<Integer> methodCallees) {
+		BinExport2.Instruction.Builder ib = BinExport2.Instruction.newBuilder();
 		ib.setAddress(address);
 
 		String mnem = insn == null ? NOP : mnemonicOf(insn);
-		int idx = mnemonicIdx.getOrDefault(mnem, 0);
+		Integer idx = mnemonicIdx.get(mnem);
+		if (idx == null) {
+			// Histogram and emission share blocksByMethod, so a miss is a bug;
+			// falling back to 0 would silently emit the most frequent mnemonic.
+			throw new IllegalStateException("mnemonic missing from histogram: " + mnem);
+		}
 		if (idx != 0) {
 			ib.setMnemonicIndex(idx);
 		}
-		if (insn == null) {
-			return;
-		}
-		for (int opIndex : buildOperands(insn)) {
-			ib.addOperandIndex(opIndex);
-		}
-		if (insn instanceof BaseInvokeNode) {
-			MethodInfo callee = ((BaseInvokeNode) insn).getCallMth();
-			if (callee != null) {
-				Integer ci = methodIndexByRawId.get(callee.getRawFullId());
-				if (ci != null) {
-					ib.addCallTarget((long) (ci + 1) * METHOD_ADDR_STRIDE);
-				}
+		if (insn != null) {
+			for (int opIndex : buildOperands(insn)) {
+				ib.addOperandIndex(opIndex);
+			}
+			// call_target for every invoke in this insn's tree: jadx folds many
+			// invokes into operand trees (InsnWrapArg) and those calls belong to
+			// this instruction too. Self-recursion is kept - reference BinExport
+			// builders emit it and BinDiff's degree-based matching expects it.
+			Set<Integer> callees = new LinkedHashSet<>();
+			collectCallees(insn, callees);
+			for (int ci : callees) {
+				ib.addCallTarget(methodAddress(ci));
+				methodCallees.add(ci);
 			}
 		}
+		be.addInstruction(ib.build());
 	}
 
 	private List<Integer> buildOperands(InsnNode insn) {
@@ -253,72 +375,61 @@ public final class Exporter {
 		if (insn instanceof BaseInvokeNode) {
 			MethodInfo callee = ((BaseInvokeNode) insn).getCallMth();
 			if (callee != null) {
-				ops.add(operandOf(symbolExpr(callee.getRawFullId())));
+				ops.add(calleeOperandIdx.computeIfAbsent(callee,
+						c -> operandForSymbol(c.getRawFullId())));
 			}
 		}
 		RegisterArg result = insn.getResult();
 		if (result != null) {
-			ops.add(operandOf(argExpr(result)));
+			ops.add(operandForArg(result));
 		}
 		for (InsnArg arg : insn.getArguments()) {
-			ops.add(operandOf(argExpr(arg)));
+			ops.add(operandForArg(arg));
 		}
 		return ops;
 	}
 
-	private BinExport2.Expression argExpr(InsnArg arg) {
+	private int operandForArg(InsnArg arg) {
 		if (arg.isLiteral()) {
-			// IMMEDIATE_INT is the default type, so it is left unset.
-			return BinExport2.Expression.newBuilder()
-					.setImmediate(((LiteralArg) arg).getLiteral())
-					.build();
+			return operandForImmediate(((LiteralArg) arg).getLiteral());
 		}
 		if (arg.isRegister()) {
-			return BinExport2.Expression.newBuilder()
-					.setType(BinExport2.Expression.Type.REGISTER)
-					.setSymbol("v" + ((RegisterArg) arg).getRegNum())
-					.build();
+			return operandForRegister(((RegisterArg) arg).getRegNum());
 		}
 		if (arg.isInsnWrap()) {
 			InsnNode wrapped = arg.unwrap();
-			return symbolExpr("~" + (wrapped != null ? mnemonicOf(wrapped) : "wrap"));
+			return operandForSymbol("~" + (wrapped != null ? mnemonicOf(wrapped) : "wrap"));
 		}
-		return symbolExpr("arg");
+		return operandForSymbol("arg");
 	}
 
-	private static BinExport2.Expression symbolExpr(String symbol) {
-		return BinExport2.Expression.newBuilder()
-				.setType(BinExport2.Expression.Type.SYMBOL)
-				.setSymbol(symbol)
-				.build();
+	private int operandForImmediate(long value) {
+		// IMMEDIATE_INT is the default expression type, so it is left unset.
+		return immOperandIdx.computeIfAbsent(value, v -> addExprOperand(
+				BinExport2.Expression.newBuilder().setImmediate(v).build()));
 	}
 
-	private int operandOf(BinExport2.Expression expr) {
-		int exprIndex = getOrAddExpr(expr);
-		BinExport2.Operand op = BinExport2.Operand.newBuilder().addExpressionIndex(exprIndex).build();
-		return getOrAddOperand(op);
+	private int operandForRegister(int regNum) {
+		return regOperandIdx.computeIfAbsent(regNum, r -> addExprOperand(
+				BinExport2.Expression.newBuilder()
+						.setType(BinExport2.Expression.Type.REGISTER)
+						.setSymbol("v" + r)
+						.build()));
 	}
 
-	private int getOrAddExpr(BinExport2.Expression expr) {
-		Integer i = exprIdx.get(expr);
-		if (i != null) {
-			return i;
-		}
-		int id = be.getExpressionCount();
+	private int operandForSymbol(String symbol) {
+		return symOperandIdx.computeIfAbsent(symbol, s -> addExprOperand(
+				BinExport2.Expression.newBuilder()
+						.setType(BinExport2.Expression.Type.SYMBOL)
+						.setSymbol(s)
+						.build()));
+	}
+
+	private int addExprOperand(BinExport2.Expression expr) {
+		int exprIndex = be.getExpressionCount();
 		be.addExpression(expr);
-		exprIdx.put(expr, id);
-		return id;
-	}
-
-	private int getOrAddOperand(BinExport2.Operand op) {
-		Integer i = operandIdx.get(op);
-		if (i != null) {
-			return i;
-		}
-		int id = be.getOperandCount();
-		be.addOperand(op);
-		operandIdx.put(op, id);
-		return id;
+		be.addOperand(BinExport2.Operand.newBuilder().addExpressionIndex(exprIndex).build());
+		return be.getOperandCount() - 1;
 	}
 
 	// --- Call graph + modules ------------------------------------------------
@@ -330,62 +441,78 @@ public final class Exporter {
 		// which BinDiff requires.
 		for (int i = 0; i < methods.size(); i++) {
 			MethodNode mth = methods.get(i);
-			MethodInfo mi = mth.getMethodInfo();
-			BinExport2.CallGraph.Vertex.Builder v = cg.addVertexBuilder()
-					.setAddress((long) (i + 1) * METHOD_ADDR_STRIDE)
-					.setMangledName(mi.getRawFullId())
+			String rawId = rawId(mth);
+			BinExport2.CallGraph.Vertex.Builder v = BinExport2.CallGraph.Vertex.newBuilder()
+					.setAddress(methodAddress(i))
+					.setMangledName(rawId)
 					.setModuleIndex(moduleIndex(mth.getParentClass()));
-			String demangled = mi.getFullId();
-			if (!demangled.equals(mi.getRawFullId())) {
+			String demangled = mth.getMethodInfo().getFullId();
+			if (!demangled.equals(rawId)) {
 				v.setDemangledName(demangled);
 			}
+			cg.addVertex(v.build());
 		}
 
-		// Edges: dedup callees per method, recursing into wrapped (inlined) insns
-		// because jadx folds many invokes into operand trees.
+		// Edges for methods with exported bodies were collected while emitting
+		// instruction call targets, so call graph and per-instruction data can
+		// never disagree. Bodyless methods (failed class, oversized) still
+		// contribute call edges from whatever IR is available.
 		for (int i = 0; i < methods.size(); i++) {
-			Set<Integer> targets = new LinkedHashSet<>();
-			for (BlockNode b : safeBlocks(methods.get(i))) {
-				for (InsnNode insn : b.getInstructions()) {
-					collectCallees(insn, i, targets);
+			Set<Integer> callees = calleesByMethod.get(i);
+			if (blocksByMethod.get(i).isEmpty()) {
+				for (BlockNode b : rawBlocks(methods.get(i))) {
+					for (InsnNode insn : b.getInstructions()) {
+						collectCallees(insn, callees);
+					}
 				}
 			}
-			for (int t : targets) {
-				cg.addEdgeBuilder().setSourceVertexIndex(i).setTargetVertexIndex(t);
+			for (int t : callees) {
+				cg.addEdge(BinExport2.CallGraph.Edge.newBuilder()
+						.setSourceVertexIndex(i)
+						.setTargetVertexIndex(t)
+						.build());
 			}
 		}
 	}
 
-	private void collectCallees(InsnNode insn, int selfIdx, Set<Integer> out) {
-		if (insn instanceof BaseInvokeNode) {
-			MethodInfo callee = ((BaseInvokeNode) insn).getCallMth();
-			if (callee != null) {
-				Integer ci = methodIndexByRawId.get(callee.getRawFullId());
-				if (ci != null && ci != selfIdx) {
-					out.add(ci);
-				}
-			}
+	private void collectCallees(InsnNode insn, Set<Integer> out) {
+		Integer ci = calleeIndex(insn);
+		if (ci != null) {
+			out.add(ci);
 		}
 		for (InsnArg arg : insn.getArguments()) {
 			if (arg.isInsnWrap()) {
 				InsnNode wrapped = arg.unwrap();
 				if (wrapped != null) {
-					collectCallees(wrapped, selfIdx, out);
+					collectCallees(wrapped, out);
 				}
 			}
 		}
 	}
 
-	private int moduleIndex(ClassNode cls) {
-		String name = cls.getClassInfo().getFullName();
-		Integer i = moduleIdx.get(name);
-		if (i != null) {
-			return i;
+	/** Single source of truth for resolving an insn to a callee method index. */
+	private Integer calleeIndex(InsnNode insn) {
+		if (!(insn instanceof BaseInvokeNode)) {
+			return null;
 		}
-		int id = be.getModuleCount();
-		be.addModuleBuilder().setName(name);
-		moduleIdx.put(name, id);
-		return id;
+		MethodInfo callee = ((BaseInvokeNode) insn).getCallMth();
+		if (callee == null) {
+			return null;
+		}
+		// Misses (external callees, the common case) are cached via sentinel -
+		// computeIfAbsent would drop a null mapping and recompute every time.
+		int idx = calleeIdxCache.computeIfAbsent(callee, c -> {
+			Integer i = methodIndexByRawId.get(c.getRawFullId());
+			return i != null ? i : NOT_IN_APP;
+		});
+		return idx == NOT_IN_APP ? null : idx;
+	}
+
+	private int moduleIndex(ClassNode cls) {
+		return moduleIdx.computeIfAbsent(cls.getClassInfo().getFullName(), name -> {
+			be.addModule(BinExport2.Module.newBuilder().setName(name).build());
+			return be.getModuleCount() - 1;
+		});
 	}
 
 	// --- Meta / output -------------------------------------------------------
@@ -401,14 +528,14 @@ public final class Exporter {
 	}
 
 	private File resolveOutputFile(JadxArgs args) {
-		String override = System.getProperty("binexport.output");
+		String override = options.getOutput();
 		if (override != null && !override.isEmpty()) {
 			return new File(override);
 		}
 		File input = firstInput(args);
-		String base = input != null ? stripExt(input.getName()) : "app";
+		String base = input != null ? CommonFileUtils.removeFileExtension(input.getName()) : "app";
 		File dir;
-		String outdir = System.getProperty("binexport.outdir");
+		String outdir = options.getOutDir();
 		if (outdir != null && !outdir.isEmpty()) {
 			dir = new File(outdir);
 		} else if (args.getOutDir() != null) {
@@ -424,18 +551,18 @@ public final class Exporter {
 		return inputs == null || inputs.isEmpty() ? null : inputs.get(0);
 	}
 
-	private static String stripExt(String fileName) {
-		int dot = fileName.lastIndexOf('.');
-		return dot > 0 ? fileName.substring(0, dot) : fileName;
-	}
-
 	private static String sha256(File file, String fallback) {
 		if (file == null || !file.isFile()) {
 			return fallback;
 		}
-		try {
+		try (InputStream in = Files.newInputStream(file.toPath())) {
 			MessageDigest md = MessageDigest.getInstance("SHA-256");
-			byte[] hash = md.digest(Files.readAllBytes(file.toPath()));
+			byte[] buf = new byte[64 * 1024];
+			int n;
+			while ((n = in.read(buf)) != -1) {
+				md.update(buf, 0, n);
+			}
+			byte[] hash = md.digest();
 			StringBuilder sb = new StringBuilder(hash.length * 2);
 			for (byte x : hash) {
 				sb.append(Character.forDigit((x >> 4) & 0xF, 16));
@@ -449,34 +576,38 @@ public final class Exporter {
 
 	// --- Small helpers -------------------------------------------------------
 
-	private static List<BlockNode> safeBlocks(MethodNode mth) {
-		try {
-			if (mth.isNoCode()) {
-				return Collections.emptyList();
-			}
-			List<BlockNode> blocks = mth.getBasicBlocks();
-			return blocks == null ? Collections.emptyList() : blocks;
-		} catch (Throwable t) {
-			return Collections.emptyList();
-		}
+	/** Links vertex addresses, instruction bases and call targets - keep single. */
+	private static long methodAddress(int methodIndex) {
+		return (methodIndex + 1L) * METHOD_ADDR_STRIDE;
 	}
 
-	private static InsnType lastType(BlockNode b) {
+	private String rawId(MethodNode mth) {
+		return rawIdCache.computeIfAbsent(mth, m -> m.getMethodInfo().getRawFullId());
+	}
+
+	private static InsnNode lastInsn(BlockNode b) {
 		List<InsnNode> insns = b.getInstructions();
-		return insns.isEmpty() ? null : insns.get(insns.size() - 1).getType();
+		return insns.isEmpty() ? null : insns.get(insns.size() - 1);
 	}
 
-	private static BinExport2.FlowGraph.Edge.Type edgeType(InsnType last, int succCount, int index) {
-		if (succCount <= 1) {
+	private static BinExport2.FlowGraph.Edge.Type edgeType(InsnNode last, int succCount, BlockNode succ) {
+		if (last == null || succCount <= 1) {
 			return BinExport2.FlowGraph.Edge.Type.UNCONDITIONAL;
 		}
-		if (last == InsnType.SWITCH) {
+		if (last.getType() == InsnType.SWITCH) {
 			return BinExport2.FlowGraph.Edge.Type.SWITCH;
 		}
-		if (last == InsnType.IF && succCount == 2) {
-			return index == 0
-					? BinExport2.FlowGraph.Edge.Type.CONDITION_TRUE
-					: BinExport2.FlowGraph.Edge.Type.CONDITION_FALSE;
+		if (last instanceof IfNode) {
+			// jadx keeps then/else on the IfNode itself; successor list order is
+			// unrelated (the fall-through/else edge is usually connected first,
+			// and invertCondition() swaps then/else without reordering it).
+			IfNode ifInsn = (IfNode) last;
+			if (succ == ifInsn.getThenBlock()) {
+				return BinExport2.FlowGraph.Edge.Type.CONDITION_TRUE;
+			}
+			if (succ == ifInsn.getElseBlock()) {
+				return BinExport2.FlowGraph.Edge.Type.CONDITION_FALSE;
+			}
 		}
 		return BinExport2.FlowGraph.Edge.Type.UNCONDITIONAL;
 	}
@@ -494,6 +625,14 @@ public final class Exporter {
 	}
 
 	private static String mnemonicOf(InsnNode insn) {
-		return insn.getType().name().toLowerCase(Locale.ROOT).replace('_', '-');
+		return MNEMONIC_BY_TYPE.get(insn.getType());
+	}
+
+	private static Map<InsnType, String> buildMnemonicTable() {
+		Map<InsnType, String> map = new EnumMap<>(InsnType.class);
+		for (InsnType type : InsnType.values()) {
+			map.put(type, type.name().toLowerCase(Locale.ROOT).replace('_', '-'));
+		}
+		return map;
 	}
 }

@@ -16,8 +16,8 @@ serialize it. The proto was designed with DEX in mind (`Architecture::kDex`,
 ```
 src/main/proto/binexport2.proto                     # vendored verbatim from google/binexport
 src/main/java/dev/apkdiff/binexport/
-  BinExportPlugin.java   # JadxPlugin. CLI/library => auto (AfterLoadPass); GUI => menu action
-  BinExportPass.java     # JadxAfterLoadPass — runs at end of load(), drives export
+  BinExportPlugin.java   # JadxPlugin. CLI/library => auto (SimpleAfterLoadPass); GUI => menu action
+  BinExportOptions.java  # per-instance plugin options (output/outdir), sysprop fallback
   Exporter.java          # THE mapping logic (jadx model -> BinExport2)
 src/main/resources/META-INF/services/jadx.api.plugins.JadxPlugin   # plugin registration
 src/test/java/.../ExporterIntegrationTest.java      # real jadx E2E test
@@ -44,21 +44,29 @@ jadx plugins --install-jar build/libs/apk-diff-binexport-0.1.0.jar
 jadx -d out_v1 app-v1.apk        # -> out_v1/app-v1.BinExport
 jadx -d out_v2 app-v2.apk        # -> out_v2/app-v2.BinExport
 ```
-Output path resolution (first wins): `-Dbinexport.output=<file>` → `-Dbinexport.outdir=<dir>` → jadx out dir. GUI: `Plugins → Export to BinExport`.
+Output path resolution (first wins): plugin option `apk-diff-binexport.output` (legacy `-Dbinexport.output`) → `apk-diff-binexport.outdir` (legacy `-Dbinexport.outdir`) → jadx out dir. Existing files are overwritten with a log warning. GUI: `Plugins → Export to BinExport`.
 
 ## GOTCHAS (hard-won — read before touching Exporter)
 
 1. **`cls.decompile()` DESTROYS the CFG.** `ProcessClass.process(cls, codegen=true)` calls `cls.unload()` right after code generation, nulling `MethodNode.blocks`. Symptom: export runs but `instructions=0`, empty flow graphs. Fix in use: `cls.root().getProcessClasses().forceProcess(cls)` runs the decompile passes (block split, SSA, dominators, region maker) **without** codegen/unload, leaving blocks intact and state `PROCESS_COMPLETE`. Normal `jadx.save()` afterwards still works (codegen from the already-processed state).
 
-2. **jadx has no "after decompile" hook.** Pass types are only `JadxPreparePass`, `JadxDecompilePass`, `JadxAfterLoadPass`. `JadxAfterLoadPass.init(decompiler)` fires at the *end of `load()`*, **before** any decompilation. So the pass must drive decompilation itself (that's what `forceProcess` above is for) and then write the file. There is no streaming "last method" signal — the after-load-drives-everything design gives a clean single-threaded pass with a definite end.
+2. **jadx has no "after decompile" hook.** Pass types are only `JadxPreparePass`, `JadxDecompilePass`, `JadxAfterLoadPass`. `JadxAfterLoadPass.init(decompiler)` fires at the *end of `load()`*, **before** any decompilation. So the pass must drive decompilation itself (that's what `forceProcess` above is for) and then write the file. We use jadx's `SimpleAfterLoadPass` (no custom pass class needed). There is no streaming "last method" signal — the after-load-drives-everything design gives a clean single-threaded pass with a definite end.
 
-3. **GUI vs CLI branching.** `context.getGuiContext() != null` ⇒ GUI: register an on-demand menu action (don't auto-export the whole app on every project open). Else CLI/library: register the AfterLoadPass. Both call `Exporter.run(decompiler)`.
+3. **GUI vs CLI branching.** `context.getGuiContext() != null` ⇒ GUI: register an on-demand menu action (don't auto-export the whole app on every project open). Else CLI/library: register the AfterLoadPass. Both call `Exporter.runLogged(decompiler, options)` (single error contract, slf4j — `System.out` never reaches jadx-gui's Log Viewer). The GUI action fetches `context.getDecompiler()` at **click time** (the init-time instance can go stale on project reload) and an `AtomicBoolean` rejects concurrent runs (two exports would race on one output file).
+
+3a. **Use `getRoot().getClasses()`, NOT `decompiler.getClasses()`.** The latter filters out classes flagged `AFlag.DONT_GENERATE` (deduplicated multidex entries, synthetic holders) — their methods would silently vanish from the call graph, producing phantom diffs. `getRoot().getClasses()` enumerates the full model (including inner classes; the visited-set handles the overlap with the inner/inlined recursion).
+
+3b. **IF edge labels come from `IfNode.getThenBlock()/getElseBlock()`, NEVER successor order.** jadx connects the fall-through (else) successor first, and `invertCondition()` swaps then/else *without* reordering successors — "first successor = TRUE" is inverted in the common case. Verified against jadx 1.5.6 sources.
 
 4. **jadx IR is normalized, NOT raw smali.** Instructions are jadx's post-transform IR (`InsnType`), and many `invoke`s get **folded into operand trees** as `InsnWrapArg`. Consequences:
-   - Call-graph completeness requires recursing wrapped args (`arg.isInsnWrap()` → `arg.unwrap()`), else you miss calls. `Exporter.collectCallees` does this.
+   - Call-graph completeness requires recursing wrapped args (`arg.isInsnWrap()` → `arg.unwrap()`), else you miss calls. `Exporter.collectCallees` does this, and `emitInstruction` runs it per instruction so folded invokes also get `call_target` — callees are accumulated per method there, so the call graph and per-instruction data can never disagree (single IR sweep, no separate call-graph pass). Self-recursion edges are **kept** (BinDiff's degree-based matching expects them).
    - Two files are only comparable in BinDiff if produced by the **same jadx version** (mnemonic set + folding differ across versions). This is a hard rule, surface it to users.
 
 5. **Empty/synthetic blocks.** jadx enter/exit blocks often have 0 instructions. A `BasicBlock` needs ≥1 instruction for its index range, so we emit a synthetic `nop` for empty blocks (kept in the mnemonic histogram too). Don't "optimize" these away or CFG edges break.
+
+6. **Degraded-body accounting.** `resolveBlocks` decides ONCE which methods export with a body; all three passes share `blocksByMethod`. A method exports as a bodyless call-graph vertex when: it has no code; its top-level class failed `forceProcess` (partially-transformed IR would export misleading bodies — failures are counted and summarized at the end); or its emitted instruction count would spill past the 2^20 per-method address stride (addresses would stop being unique — logged per method). Bodyless methods **still contribute call-graph edges** — `buildCallGraph` walks their `rawBlocks` for callees; only the flow graph/instructions are withheld. Duplicate `getRawFullId()`s (same class in two inputs) resolve to the **first** copy with a warning.
+
+7. **Sysprop passing on the jadx CLI.** jadx has NO `-J` JVM-arg passthrough (unknown options become input files via JCommander's `acceptUnknownOptions`). Legacy sysprops must go through `JADX_OPTS`/`JAVA_OPTS` env vars; the plugin options (`-Papk-diff-binexport.output=...`) are the primary interface. jadx calls `setOptions` during `registerOptions()` in every mode (CLI/GUI/library), and `BasePluginOptionsBuilder` invokes setters with `defaultValue` for absent keys.
 
 ## BinExport2 format rules (from the canonical reference)
 
@@ -69,15 +77,15 @@ Canonical reference is Google's Ghidra exporter `java/src/main/java/com/google/s
 - **Vertices MUST be sorted by ascending `address`** (BinDiff requirement). We add them in method-index order and give method `i` address `(i+1) << 20`, so ordering is automatic; `vertexIndex == methodIndex`.
 - `Instruction.address` is optional (fill only on discontinuity); we fill it on **every** instruction (simpler, valid).
 - `Expression` default type is `IMMEDIATE_INT` → leave `type` unset for immediates (matches "omit defaults" intent).
-- De-dup `Expression`/`Operand` via `HashMap<proto,Integer>` (proto message equality). Instructions/blocks are NOT deduped — we emit them method-by-method so each block's instructions are a contiguous `[begin,end)` range.
+- De-dup `Expression`/`Operand` keyed by the primitive that fully determines them (literal long / reg num / symbol string — every operand here is a single expression), so the hit path allocates no throwaway protos; same result as BinExport's proto-keyed scheme. Instructions/blocks are NOT deduped — we emit them method-by-method so each block's instructions are a contiguous `[begin,end)` range. Instructions/blocks/flow-graphs are added as **built messages** (`addInstruction(msg)`), not via `addXxxBuilder()` — repeated-field builder mode would hold millions of mutable wrappers in memory.
 
 ## Address synthesis
 
-Dalvik has no linear address space. Scheme: sort methods by `MethodInfo.getRawFullId()`, method `i` → base `(i+1) << 20`; instruction address = `base + sequenceIndex`. `1<<20` (~1M) headroom per method. Addresses only need to be **unique + stable within one file** (BinDiff matches structurally, not by absolute address); stable ordering keeps the same method at the same address across rebuilds of the same input.
+Dalvik has no linear address space. Scheme: sort methods by `MethodInfo.getRawFullId()` (cached per method — jadx rebuilds the string on every call), method `i` → base `methodAddress(i) = (i+1) << 20`; instruction address = `base + sequenceIndex`. `1<<20` (~1M) headroom per method; methods that would exceed it are exported bodyless with a warning (see gotcha 6). `methodAddress()` is the **single** helper linking vertex addresses, instruction bases and `call_target` — never inline the formula. Addresses only need to be **unique + stable within one file** (BinDiff matches structurally, not by absolute address); stable ordering keeps the same method at the same address across rebuilds of the same input.
 
 ## Key jadx API cheat-sheet
 
-- `JadxDecompiler.getClasses()` → `List<JavaClass>`; `jc.getClassNode()` → `ClassNode` (marked internal but public).
+- `JadxDecompiler.getRoot().getClasses()` → full `List<ClassNode>` incl. inner + `DONT_GENERATE` (what we use). `decompiler.getClasses()` → filtered `List<JavaClass>` (drops `DONT_GENERATE`; don't use for export).
 - `ClassNode`: `root()`, `getMethods()`, `getInnerClasses()`, `getInlinedClasses()`, `getClassInfo().getFullName()`.
 - `MethodNode`: `getMethodInfo()`, `isNoCode()`, `getBasicBlocks()` (null/empty until processed), `getEnterBlock()`, `getParentClass()`.
 - `MethodInfo`: `getRawFullId()` (stable, `$`-separated inner), `getFullId()` (readable), `getShortId()`.
@@ -87,20 +95,22 @@ Dalvik has no linear address space. Scheme: sort methods by `MethodInfo.getRawFu
 
 ## Test approach
 
-`ExporterIntegrationTest` compiles a small class with `ToolProvider` javac, loads it through jadx via **`jadx-java-input`** (compiled `.class` path, not DEX), lets the AfterLoadPass export, then `BinExport2.parseFrom` and asserts invariants (sorted vertices, entry∈blocks, global indices in range, valid instruction ranges, ≥1 call edge, a back edge from the loop). Last run: `vertices=4 edges=2 instructions=30 basicBlocks=25 flowGraphs=4 backEdge=true`.
+`ExporterIntegrationTest` compiles a small class with `ToolProvider` javac, loads it through jadx via **`jadx-java-input`** (compiled `.class` path, not DEX), lets the AfterLoadPass export, then `BinExport2.parseFrom` and asserts invariants (sorted vertices, entry∈blocks, global indices in range, valid instruction ranges, ≥1 call edge, a back edge from the loop, CONDITION_TRUE **and** CONDITION_FALSE edges present, a self edge for the recursive `fact()`, ≥1 instruction with `call_target`). Last run: `vertices=5 edges=3 instructions=37 basicBlocks=32 flowGraphs=5 mnemonics=6 backEdge=true`.
 
-## NOT yet verified (do this next)
+## Verification status
 
-- **Real APK/DEX path** (`jadx-dex-input`). The mapping is input-agnostic (operates on the post-load jadx model) so it should work, but no real APK smoke test has been run in-repo.
-- **BinDiff actually ingesting the file.** The proto is structurally valid and follows the reference builder, but no BinDiff was available to confirm end-to-end diffing.
+- **Real APK/DEX path: VERIFIED** (2026-07-18). `RealApkSmokeTest` (opt-in: `./gradlew test -Pbinexport.smoke.apk=/path/app.apk`) ran a real 1.3MB APK through jadx-dex-input 1.5.6: 13,226 vertices / 10,168 call edges / 90,106 instructions / 11,807 flow graphs, all structural invariants held. jadx's own RegionMaker failures on 2 classes exercised the degraded-body path correctly (bodyless vertices + warning).
+- **End-user plugin path: VERIFIED** (2026-07-18). Shadow jar installed into Homebrew jadx **1.5.5** (`jadx plugins --install-jar`), exported the same APK via CLI auto-pass; output parsed back with the relocated protobuf (`PARSE_OK`, sorted vertices). So the relocation works and the plugin is API-compatible down to at least 1.5.5. Note: `jadx plugins` shows local-jar installs as `version null` — that's jadx's `LocalFileResolver` (never sets a version for file installs), not a plugin bug.
+- **NOT yet verified: BinDiff actually ingesting the file.** The proto is structurally valid and follows the reference builder, but no BinDiff install was available to confirm end-to-end diffing.
 
 ## Backlog / next improvements
 
 1. Enrich operands: put const-string values, field/type/method symbols into `string_table` + `string_reference` (currently operands are just reg/immediate/`symbol`). Biggest matching-quality win.
-2. Add `IMPORTED` vertices + call edges for framework/external calls (currently only in-app edges).
-3. IF true/false edge labeling is approximate (first succ = TRUE). Derive real branch target from the `if` insn if precision matters.
-4. Memory: all classes stay loaded (no unload) — fine for small/medium apps, may need streaming for huge multidex.
-5. Consider exporting native `lib/*.so` via existing BinExport ARM/AArch64 path for a full "APK diff" (out of scope for this plugin).
+2. Add `IMPORTED` vertices + call edges for framework/external calls (currently only in-app edges); consider typing no-code (abstract/native) vertices as non-NORMAL too.
+3. Memory: all classes stay loaded (no unload) — fine for small/medium apps, may need streaming for huge multidex (proto side already uses immutable adds, so the builder overhead is gone).
+4. Consider exporting native `lib/*.so` via existing BinExport ARM/AArch64 path for a full "APK diff" (out of scope for this plugin).
+5. CLI still exits 0 when the export fails (the pass logs the error but jadx's decompile result is independent); a strict-mode option could rethrow for CI pipelines.
+6. Record the jadx version in `meta_information` so a version mismatch between two files is detectable.
 
 ## Reference URLs
 

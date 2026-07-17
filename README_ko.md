@@ -70,15 +70,18 @@ jadx -d out_v1 app-v1.apk        # -> out_v1/app-v1.BinExport
 jadx -d out_v2 app-v2.apk        # -> out_v2/app-v2.BinExport
 ```
 
-출력 경로를 직접 지정하려면:
+출력 경로를 직접 지정하려면 (플러그인 옵션 — `jadx plugins`와 GUI 설정에서도 확인 가능):
 
 ```bash
-jadx -d out app.apk -J-Dbinexport.output=/path/app.BinExport
-# 또는 디렉터리:   -J-Dbinexport.outdir=/some/dir
+jadx -d out app.apk -Papk-diff-binexport.output=/path/app.BinExport
+# 또는 디렉터리:   -Papk-diff-binexport.outdir=/some/dir
+# 기존 시스템 프로퍼티도 계속 동작 (jadx에는 -J 전달이 없으므로 환경변수 사용):
+#   JADX_OPTS="-Dbinexport.output=/path/app.BinExport" jadx -d out app.apk
 ```
 
-출력 경로 결정 순서(먼저 매치되는 것): `-Dbinexport.output` → `-Dbinexport.outdir`
-→ jadx 출력 디렉터리, 파일명은 `<입력-베이스명>.BinExport`.
+출력 경로 결정 순서(먼저 매치되는 것): `output` 옵션 → `outdir` 옵션
+→ jadx 출력 디렉터리, 파일명은 `<입력-베이스명>.BinExport`. 같은 파일명의 두 버전을
+export할 때는 경로를 다르게 지정하세요 — 기존 파일은 (로그 경고와 함께) 덮어씁니다.
 
 ### GUI (수동)
 

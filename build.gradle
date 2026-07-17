@@ -14,20 +14,23 @@ ext {
 
 repositories {
     mavenCentral()
+    google() // smali (jadx-dex-input dependency) lives on Google's Maven repo
 }
 
 dependencies {
     // Provided by the jadx runtime; must not be bundled.
     compileOnly "io.github.skylot:jadx-core:${jadxVersion}"
-    compileOnly 'org.jetbrains:annotations:24.1.0'
+    compileOnly 'org.slf4j:slf4j-api:2.0.13'
 
     // Bundled (shaded + relocated) into the plugin jar.
     implementation "com.google.protobuf:protobuf-java:${protobufVersion}"
 
     // Integration test: run the exporter against a real jadx model built from
-    // compiled .class input.
+    // compiled .class input; the optional smoke test additionally needs the
+    // DEX input plugin (the real APK path).
     testImplementation "io.github.skylot:jadx-core:${jadxVersion}"
     testImplementation "io.github.skylot:jadx-java-input:${jadxVersion}"
+    testImplementation "io.github.skylot:jadx-dex-input:${jadxVersion}"
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.2'
 }
@@ -35,6 +38,10 @@ dependencies {
 test {
     useJUnitPlatform()
     testLogging { showStandardStreams = true }
+    // Opt-in real-APK smoke test: ./gradlew test -Pbinexport.smoke.apk=/path/app.apk
+    if (project.hasProperty('binexport.smoke.apk')) {
+        systemProperty 'binexport.smoke.apk', project.property('binexport.smoke.apk')
+    }
 }
 
 protobuf {
