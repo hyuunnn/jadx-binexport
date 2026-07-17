@@ -94,46 +94,13 @@ final class BinDiffResultsPanel {
 			return;
 		}
 
-		JTable table = new JTable(model);
-		table.setAutoCreateRowSorter(false);
-		TableRowSorter<ResultsTableModel> sorter = new TableRowSorter<>(model);
-		table.setRowSorter(sorter);
-		// Most useful default: changed functions (lowest similarity) first.
-		sorter.setSortKeys(List.of(new javax.swing.RowSorter.SortKey(2, SortOrder.ASCENDING)));
-		table.getColumnModel().getColumn(2).setCellRenderer(new SimilarityRenderer());
-		table.getColumnModel().getColumn(3).setCellRenderer(new DecimalRenderer());
-		table.getColumnModel().getColumn(0).setPreferredWidth(320);
-		table.getColumnModel().getColumn(1).setPreferredWidth(320);
-		table.getColumnModel().getColumn(2).setMaxWidth(90);
-		table.getColumnModel().getColumn(3).setMaxWidth(90);
-		table.setFillsViewportHeight(true);
-
-		Runnable navigate = () -> {
-			int viewRow = table.getSelectedRow();
-			if (viewRow < 0) {
-				return;
-			}
-			MethodNode target = model.methodAt(table.convertRowIndexToModel(viewRow));
-			if (target == null || !gui.open(target)) {
+		JTable table = buildNavigableTable(model, node -> {
+			if (!gui.open(node)) {
 				LOG.warn("[BinExport] could not navigate to selected function");
 			}
-		};
-		table.addMouseListener(new MouseAdapter() {
-			@Override
-			public void mouseClicked(MouseEvent e) {
-				if (e.getClickCount() == 2) {
-					navigate.run();
-				}
-			}
 		});
-		table.getInputMap(JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT)
-				.put(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, 0), "binexport-open");
-		table.getActionMap().put("binexport-open", new javax.swing.AbstractAction() {
-			@Override
-			public void actionPerformed(java.awt.event.ActionEvent e) {
-				navigate.run();
-			}
-		});
+		@SuppressWarnings("unchecked")
+		TableRowSorter<ResultsTableModel> sorter = (TableRowSorter<ResultsTableModel>) table.getRowSorter();
 
 		JTextField filter = new JTextField();
 		filter.getDocument().addDocumentListener(new DocumentListener() {
@@ -180,8 +147,57 @@ final class BinDiffResultsPanel {
 		dialog.setVisible(true);
 	}
 
+	/**
+	 * Builds the results table with sorting, coloring, and double-click / Enter
+	 * navigation wired to {@code onOpen}. Package-private so a test can drive the
+	 * exact click path without a jadx-gui or a JDialog.
+	 */
+	static JTable buildNavigableTable(ResultsTableModel model, java.util.function.Consumer<MethodNode> onOpen) {
+		JTable table = new JTable(model);
+		table.setAutoCreateRowSorter(false);
+		TableRowSorter<ResultsTableModel> sorter = new TableRowSorter<>(model);
+		table.setRowSorter(sorter);
+		// Most useful default: changed functions (lowest similarity) first.
+		sorter.setSortKeys(List.of(new javax.swing.RowSorter.SortKey(2, SortOrder.ASCENDING)));
+		table.getColumnModel().getColumn(2).setCellRenderer(new SimilarityRenderer());
+		table.getColumnModel().getColumn(3).setCellRenderer(new DecimalRenderer());
+		table.getColumnModel().getColumn(0).setPreferredWidth(320);
+		table.getColumnModel().getColumn(1).setPreferredWidth(320);
+		table.getColumnModel().getColumn(2).setMaxWidth(90);
+		table.getColumnModel().getColumn(3).setMaxWidth(90);
+		table.setFillsViewportHeight(true);
+
+		Runnable navigate = () -> {
+			int viewRow = table.getSelectedRow();
+			if (viewRow < 0) {
+				return;
+			}
+			MethodNode target = model.methodAt(table.convertRowIndexToModel(viewRow));
+			if (target != null) {
+				onOpen.accept(target);
+			}
+		};
+		table.addMouseListener(new MouseAdapter() {
+			@Override
+			public void mouseClicked(MouseEvent e) {
+				if (e.getClickCount() == 2) {
+					navigate.run();
+				}
+			}
+		});
+		table.getInputMap(JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT)
+				.put(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, 0), "binexport-open");
+		table.getActionMap().put("binexport-open", new javax.swing.AbstractAction() {
+			@Override
+			public void actionPerformed(java.awt.event.ActionEvent e) {
+				navigate.run();
+			}
+		});
+		return table;
+	}
+
 	/** Table model over the matches that resolve to a method in this session. */
-	private static final class ResultsTableModel extends AbstractTableModel {
+	static final class ResultsTableModel extends AbstractTableModel {
 		private static final String[] COLS = {"Function (this app)", "Matched in other version", "Similarity", "Confidence"};
 
 		private final List<String> local = new java.util.ArrayList<>();
