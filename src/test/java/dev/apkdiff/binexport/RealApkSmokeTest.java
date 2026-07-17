@@ -33,24 +33,13 @@ class RealApkSmokeTest {
 		File apk = new File(System.getProperty("binexport.smoke.apk"));
 		assertTrue(apk.isFile(), "APK not found: " + apk);
 
-		Path out = tmp.resolve("smoke.BinExport");
-		System.setProperty("binexport.output", out.toString());
-		try {
-			JadxArgs args = new JadxArgs();
-			args.getInputFiles().add(apk);
-			args.setOutDir(tmp.resolve("jadx-out").toFile());
-			try (JadxDecompiler jadx = new JadxDecompiler(args)) {
-				jadx.load(); // triggers the after-load pass => writes the file
-			}
-		} finally {
-			System.clearProperty("binexport.output");
-		}
+		BinExport2 be = exportApk(apk, tmp, "run1");
 
-		assertTrue(Files.isRegularFile(out), "BinExport file was not produced");
-		BinExport2 be;
-		try (InputStream is = Files.newInputStream(out)) {
-			be = BinExport2.parseFrom(is);
-		}
+		// Addresses/order must be stable across rebuilds of the same input -
+		// BinDiff workflows depend on it. Only the timestamp may differ.
+		BinExport2 be2 = exportApk(apk, tmp, "run2");
+		assertTrue(clearTimestamp(be).equals(clearTimestamp(be2)),
+				"two exports of the same APK must be identical (minus timestamp)");
 
 		BinExport2.CallGraph cg = be.getCallGraph();
 		assertTrue(cg.getVertexCount() > 0, "no call-graph vertices");
@@ -95,6 +84,31 @@ class RealApkSmokeTest {
 				+ " flowGraphs=" + be.getFlowGraphCount()
 				+ " mnemonics=" + be.getMnemonicCount()
 				+ " modules=" + be.getModuleCount()
-				+ " size=" + Files.size(out));
+				+ " deterministic=true");
+	}
+
+	private static BinExport2 exportApk(File apk, Path tmp, String runName) throws Exception {
+		Path out = tmp.resolve(runName + ".BinExport");
+		System.setProperty("binexport.output", out.toString());
+		try {
+			JadxArgs args = new JadxArgs();
+			args.getInputFiles().add(apk);
+			args.setOutDir(tmp.resolve("jadx-out-" + runName).toFile());
+			try (JadxDecompiler jadx = new JadxDecompiler(args)) {
+				jadx.load(); // triggers the after-load pass => writes the file
+			}
+		} finally {
+			System.clearProperty("binexport.output");
+		}
+		assertTrue(Files.isRegularFile(out), "BinExport file was not produced: " + out);
+		try (InputStream is = Files.newInputStream(out)) {
+			return BinExport2.parseFrom(is);
+		}
+	}
+
+	private static BinExport2 clearTimestamp(BinExport2 be) {
+		return be.toBuilder()
+				.setMetaInformation(be.getMetaInformation().toBuilder().clearTimestamp())
+				.build();
 	}
 }

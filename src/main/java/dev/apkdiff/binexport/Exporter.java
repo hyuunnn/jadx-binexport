@@ -460,10 +460,15 @@ public final class Exporter {
 		for (int i = 0; i < methods.size(); i++) {
 			Set<Integer> callees = calleesByMethod.get(i);
 			if (blocksByMethod.get(i).isEmpty()) {
-				for (BlockNode b : rawBlocks(methods.get(i))) {
-					for (InsnNode insn : b.getInstructions()) {
-						collectCallees(insn, callees);
+				try {
+					for (BlockNode b : rawBlocks(methods.get(i))) {
+						for (InsnNode insn : b.getInstructions()) {
+							collectCallees(insn, callees);
+						}
 					}
+				} catch (Throwable t) {
+					// Partially-transformed IR of a failed class may throw anywhere;
+					// keep the callees collected so far instead of killing the export.
 				}
 			}
 			for (int t : callees) {

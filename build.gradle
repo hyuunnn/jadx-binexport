@@ -41,6 +41,9 @@ test {
     // Opt-in real-APK smoke test: ./gradlew test -Pbinexport.smoke.apk=/path/app.apk
     if (project.hasProperty('binexport.smoke.apk')) {
         systemProperty 'binexport.smoke.apk', project.property('binexport.smoke.apk')
+        // A smoke run must actually run - never let the up-to-date check skip it
+        // (the APK's content is not a task input, so Gradle can't tell it changed).
+        outputs.upToDateWhen { false }
     }
 }
 
