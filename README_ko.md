@@ -83,6 +83,9 @@ jadx -d out app.apk -Pjadx-binexport.output=/path/app.BinExport
 jadx -d out app.apk -Pjadx-binexport.strict=true
 # 프레임워크 호출까지 IMPORTED 정점/엣지로 내보내려면 (매칭 정확도↑, 파일 커짐):
 jadx -d out app.apk -Pjadx-binexport.imports=true
+#   주의: jadx 버전과 마찬가지로 `imports` 설정도 diff 양쪽이 일치해야 합니다.
+#   한쪽만 켜면 콜그래프 구조가 달라져 매칭 품질이 떨어집니다 (GUI diff는
+#   불일치를 감지해 경고합니다).
 # 기존 시스템 프로퍼티도 계속 동작 (jadx에는 -J 전달이 없으므로 환경변수 사용):
 #   JADX_OPTS="-Dbinexport.output=/path/app.BinExport" jadx -d out app.apk
 ```

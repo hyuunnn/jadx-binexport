@@ -92,10 +92,35 @@ final class BinDiffResultsPanel {
 		// the dialog stuck on screen or the guard latched.
 		ExportProgressDialog progress =
 				new ExportProgressDialog(gui.getMainFrame(), "Diff against " + other.getName());
+		// The dialog handles progress/cancel; advisory warnings (e.g. an
+		// imports-setting mismatch between the two files) additionally surface as
+		// a non-blocking dialog - a log-only warning is invisible in the GUI.
+		ExportProgress sink = new ExportProgress() {
+			@Override
+			public void stage(String label, int total) {
+				progress.stage(label, total);
+			}
+
+			@Override
+			public void update(int done, int total) {
+				progress.update(done, total);
+			}
+
+			@Override
+			public boolean cancelled() {
+				return progress.cancelled();
+			}
+
+			@Override
+			public void warn(String message) {
+				gui.uiRun(() -> JOptionPane.showMessageDialog(gui.getMainFrame(),
+						message, "BinDiff", JOptionPane.WARNING_MESSAGE));
+			}
+		};
 		Thread worker = new Thread(() -> {
 			File binDiff = null;
 			try {
-				binDiff = BinDiffRunner.diff(context.getDecompiler(), other, options, progress);
+				binDiff = BinDiffRunner.diff(context.getDecompiler(), other, options, sink);
 				String name = binDiff.getName();
 				progress.stage("Loading results…", 0);
 				if (progress.cancelled()) {

@@ -28,8 +28,12 @@ public class BinExportOptions extends BasePluginOptionsBuilder {
 	private String output;
 	private String outDir;
 	private String bindiff;
-	private boolean strict;
-	private boolean imports;
+	// Tri-state (null = not set): an explicit =false must beat a JVM-global
+	// legacy sysprop =true, which an OR over a primitive boolean cannot express.
+	// No defaultValue is registered, so jadx's parseOption passes null through
+	// for absent keys; the null-safe formatter shows the effective default.
+	private Boolean strict;
+	private Boolean imports;
 
 	@Override
 	public void registerOptions() {
@@ -47,11 +51,11 @@ public class BinExportOptions extends BasePluginOptionsBuilder {
 				.setter(v -> bindiff = v);
 		boolOption(BinExportPlugin.PLUGIN_ID + ".strict")
 				.description("fail the run (non-zero exit) if the export fails, for CI")
-				.defaultValue(false)
+				.formatter(v -> v == null ? "false" : v.toString())
 				.setter(v -> strict = v);
 		boolOption(BinExportPlugin.PLUGIN_ID + ".imports")
 				.description("also emit IMPORTED vertices/edges for external calls (richer diff, larger output)")
-				.defaultValue(false)
+				.formatter(v -> v == null ? "false" : v.toString())
 				.setter(v -> imports = v);
 	}
 
@@ -77,9 +81,15 @@ public class BinExportOptions extends BasePluginOptionsBuilder {
 		return boolWithProp(imports, "binexport.imports");
 	}
 
-	/** A boolean option OR-ed with its legacy {@code -D} system-property fallback. */
-	private static boolean boolWithProp(boolean value, String prop) {
-		return value || Boolean.parseBoolean(System.getProperty(prop));
+	/**
+	 * A tri-state boolean option with its legacy {@code -D} system-property
+	 * fallback: an explicitly set option (true OR false) wins; the sysprop is
+	 * consulted only when the option is unset. An OR would silently let a
+	 * JVM-global {@code -D...=true} override an explicit {@code -P...=false},
+	 * making the sysprop an override instead of the documented fallback.
+	 */
+	private static boolean boolWithProp(Boolean value, String prop) {
+		return value != null ? value : Boolean.parseBoolean(System.getProperty(prop));
 	}
 
 	private static String firstNonEmpty(String value, String fallback) {

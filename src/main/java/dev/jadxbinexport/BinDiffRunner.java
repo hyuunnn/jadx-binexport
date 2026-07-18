@@ -13,6 +13,8 @@ import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.google.security.zynamics.BinExport.BinExport2;
+
 import jadx.api.JadxDecompiler;
 
 /**
@@ -76,6 +78,8 @@ final class BinDiffRunner {
 			// jadx-binexport.imports (the explicit path still bypasses path options).
 			Exporter.runToFile(decompiler, current, progress, options);
 
+			warnOnImportsMismatch(otherBinExport, options, progress);
+
 			// bindiff has no progress protocol, so show it as an indeterminate stage;
 			// runProcess polls progress.cancelled() so Cancel kills a running bindiff.
 			progress.stage("Running BinDiff…", 0);
@@ -102,6 +106,40 @@ final class BinDiffRunner {
 			return out;
 		} finally {
 			deleteRecursively(work);
+		}
+	}
+
+	/**
+	 * Both sides of a diff must be exported with the same
+	 * {@code jadx-binexport.imports} setting: IMPORTED vertices/edges change the
+	 * call-graph topology BinDiff matches on, so an on/off mismatch silently
+	 * degrades results (the same both-sides-must-match rule as the jadx and
+	 * plugin versions). The current side's setting is known from the options;
+	 * the other side is a finished file whose IMPORTED vertices are directly
+	 * visible - on disagreement, warn (log + progress sink) but still run the
+	 * diff, since the output is valid, just weaker.
+	 */
+	private static void warnOnImportsMismatch(File other, BinExportOptions options,
+			ExportProgress progress) {
+		boolean currentImports = options != null && options.isImports();
+		try (InputStream in = Files.newInputStream(other.toPath())) {
+			boolean otherImports = BinExport2.parseFrom(in)
+					.getCallGraph().getVertexList().stream()
+					.anyMatch(v -> v.getType() == BinExport2.CallGraph.Vertex.Type.IMPORTED);
+			if (currentImports != otherImports) {
+				String msg = "The two exports disagree on 'jadx-binexport.imports'"
+						+ " (current app: " + (currentImports ? "on" : "off")
+						+ ", " + other.getName() + ": " + (otherImports ? "on" : "off") + ").\n"
+						+ "Call-graph topology differs systematically between the sides,"
+						+ " so match quality will degrade.\n"
+						+ "Re-export one side so both use the same setting.";
+				LOG.warn("[BinExport] {}", msg.replace('\n', ' '));
+				progress.warn(msg);
+			}
+		} catch (IOException | RuntimeException e) {
+			// Best-effort: an unreadable/corrupt file will fail loudly in bindiff
+			// itself with a better message; don't block the diff on the check.
+			LOG.debug("[BinExport] imports-mismatch check skipped: {}", e.toString());
 		}
 	}
 

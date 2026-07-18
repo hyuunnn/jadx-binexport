@@ -86,6 +86,9 @@ jadx -d out app.apk -Pjadx-binexport.output=/path/app.BinExport
 jadx -d out app.apk -Pjadx-binexport.strict=true
 # also emit IMPORTED vertices/edges for framework calls (richer diff, larger file):
 jadx -d out app.apk -Pjadx-binexport.imports=true
+#   NOTE: like the jadx version, `imports` must MATCH on both sides of a diff -
+#   an on/off mismatch changes call-graph topology and degrades match quality
+#   (the in-GUI diff detects and warns about this).
 # legacy system properties still work (jadx has no -J passthrough, use env vars):
 #   JADX_OPTS="-Dbinexport.output=/path/app.BinExport" jadx -d out app.apk
 ```

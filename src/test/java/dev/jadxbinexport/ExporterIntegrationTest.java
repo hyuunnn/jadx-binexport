@@ -11,6 +11,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Predicate;
 
 import javax.tools.JavaCompiler;
@@ -62,10 +63,7 @@ class ExporterIntegrationTest {
 
 		assertTrue(Files.isRegularFile(out), "BinExport file was not produced");
 
-		BinExport2 be;
-		try (InputStream is = Files.newInputStream(out)) {
-			be = BinExport2.parseFrom(is);
-		}
+		BinExport2 be = parse(out);
 
 		// Meta - architecture carries the jadx version so a version-mismatch
 		// diff is detectable in BinDiff's UI/results.
@@ -78,12 +76,7 @@ class ExporterIntegrationTest {
 		// Call graph: <init>, fib, caller, helper => >= 4 vertices, sorted by address.
 		BinExport2.CallGraph cg = be.getCallGraph();
 		assertTrue(cg.getVertexCount() >= 4, "vertices: " + cg.getVertexCount());
-		long prev = -1;
-		for (BinExport2.CallGraph.Vertex v : cg.getVertexList()) {
-			assertTrue(v.getAddress() > prev, "vertices must be sorted by ascending address");
-			prev = v.getAddress();
-			assertTrue(!v.getMangledName().isEmpty(), "vertex must have a name");
-		}
+		assertVerticesSorted(cg.getVertexList());
 		assertTrue(cg.getEdgeCount() >= 1, "expected caller->fib/helper call edges");
 
 		// Bodies
@@ -282,46 +275,69 @@ class ExporterIntegrationTest {
 					"imports off must emit no IMPORTED vertices");
 
 			// ON: IMPORTED vertices present, an edge targets one, list stays sorted.
+			// Driven through the REGISTERED plugin option (key + setter wiring),
+			// not the legacy sysprop fallback - this is the primary documented
+			// interface and would otherwise have zero coverage.
 			Path on = tmp.resolve("on.BinExport");
-			System.setProperty("binexport.imports", "true");
-			try {
-				Exporter.runToFile(jadx, on.toFile(), ExportProgress.NONE, new BinExportOptions());
-			} finally {
-				System.clearProperty("binexport.imports");
-			}
+			BinExportOptions optsOn = new BinExportOptions();
+			optsOn.setOptions(Map.of(BinExportPlugin.PLUGIN_ID + ".imports", "true"));
+			Exporter.runToFile(jadx, on.toFile(), ExportProgress.NONE, optsOn);
 			BinExport2 beOn = parse(on);
 			List<BinExport2.CallGraph.Vertex> vs = beOn.getCallGraph().getVertexList();
 
-			int firstImported = -1;
-			long prev = -1;
-			for (int i = 0; i < vs.size(); i++) {
-				BinExport2.CallGraph.Vertex v = vs.get(i);
-				assertTrue(v.getAddress() > prev, "vertices must stay sorted by ascending address");
-				prev = v.getAddress();
-				if (v.getType() == BinExport2.CallGraph.Vertex.Type.IMPORTED && firstImported < 0) {
-					firstImported = i;
-				}
-			}
-			assertTrue(firstImported >= 0, "imports on must emit IMPORTED vertices");
+			assertVerticesSorted(vs);
+			assertTrue(vs.stream().anyMatch(v -> v.getType() == BinExport2.CallGraph.Vertex.Type.IMPORTED),
+					"imports on must emit IMPORTED vertices");
 			assertTrue(vs.size() > beOff.getCallGraph().getVertexCount(),
 					"imports on must add vertices");
 			boolean anyExternalName = vs.stream()
 					.filter(v -> v.getType() == BinExport2.CallGraph.Vertex.Type.IMPORTED)
 					.anyMatch(v -> v.getMangledName().contains("Math") || v.getMangledName().contains("Integer"));
 			assertTrue(anyExternalName, "an IMPORTED vertex should name an external callee");
-			final int imported = firstImported;
+			// Check the property itself (the target vertex IS imported), not the
+			// list layout ("index above the first import") it happens to have.
 			boolean edgeToImport = beOn.getCallGraph().getEdgeList().stream()
-					.anyMatch(e -> e.getTargetVertexIndex() >= imported);
+					.anyMatch(e -> vs.get(e.getTargetVertexIndex()).getType()
+							== BinExport2.CallGraph.Vertex.Type.IMPORTED);
 			assertTrue(edgeToImport, "some call edge must target an IMPORTED vertex");
+
+			// The imports setting is a comparability axis, so it must be visible
+			// in the meta (only when ON - default output stays byte-identical).
+			assertTrue(beOn.getMetaInformation().getArchitectureName().endsWith("+imports"),
+					"imports on must be recorded in architecture_name");
+			assertFalse(beOff.getMetaInformation().getArchitectureName().contains("+imports"),
+					"imports off must not change architecture_name");
 
 			System.out.println("[imports] off=" + beOff.getCallGraph().getVertexCount()
 					+ " vertices, on=" + vs.size() + " (with IMPORTED); edges target imports");
+		}
+
+		// Tri-state option semantics: an explicit =false must override the legacy
+		// sysprop (a fallback, not an override); unset still falls back to it.
+		System.setProperty("binexport.imports", "true");
+		try {
+			BinExportOptions explicitOff = new BinExportOptions();
+			explicitOff.setOptions(Map.of(BinExportPlugin.PLUGIN_ID + ".imports", "false"));
+			assertFalse(explicitOff.isImports(), "explicit =false must beat the sysprop");
+			assertTrue(new BinExportOptions().isImports(), "unset must fall back to the sysprop");
+		} finally {
+			System.clearProperty("binexport.imports");
 		}
 	}
 
 	private static BinExport2 parse(Path file) throws IOException {
 		try (InputStream is = Files.newInputStream(file)) {
 			return BinExport2.parseFrom(is);
+		}
+	}
+
+	/** BinDiff hard rule: vertices sorted by strictly ascending address, all named. */
+	private static void assertVerticesSorted(List<BinExport2.CallGraph.Vertex> vs) {
+		long prev = -1;
+		for (BinExport2.CallGraph.Vertex v : vs) {
+			assertTrue(v.getAddress() > prev, "vertices must be sorted by ascending address");
+			prev = v.getAddress();
+			assertTrue(!v.getMangledName().isEmpty(), "vertex must have a name");
 		}
 	}
 

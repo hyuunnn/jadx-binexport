@@ -172,11 +172,22 @@ public final class Exporter {
 		return e.exportLocked(decompiler);
 	}
 
-	/** Exports to an explicit file, bypassing option/sysprop path resolution. */
+	/**
+	 * Exports to an explicit file, bypassing option/sysprop path resolution.
+	 *
+	 * <p>WARNING: registered plugin options are NOT consulted either - a fresh
+	 * options instance resolves content options (e.g. {@code imports}) from the
+	 * legacy system properties only. Production callers should pass the
+	 * registered options via
+	 * {@link #runToFile(JadxDecompiler, File, ExportProgress, BinExportOptions)}
+	 * (the trap this note exists to prevent: the in-GUI diff once used this
+	 * overload and silently ignored the user's {@code jadx-binexport.imports}).
+	 */
 	public static File runToFile(JadxDecompiler decompiler, File out) {
 		return runToFile(decompiler, out, ExportProgress.NONE);
 	}
 
+	/** See {@link #runToFile(JadxDecompiler, File)} for the null-options caveat. */
 	public static File runToFile(JadxDecompiler decompiler, File out, ExportProgress progress) {
 		return runToFile(decompiler, out, progress, null);
 	}
@@ -728,22 +739,25 @@ public final class Exporter {
 
 	private void buildCallGraph() {
 		BinExport2.CallGraph.Builder cg = be.getCallGraphBuilder();
-		// One stage covers this whole phase (bodyless collection + vertices) so the
-		// bar reflects it from the start instead of sitting under the prior label.
 		progress.stage("Building call graph", methods.size());
 
-		// 1. Finish collecting callees. Bodied methods were done while emitting
-		// instruction call targets (buildBodies), so call graph and per-instruction
-		// data can never disagree; collect the bodyless ones (failed class,
-		// oversized) now - and, with imports on, this must happen BEFORE numbering
-		// vertices so the IMPORTED set is complete.
+		// 1. Vertices in ascending-address order: in-app methods (NORMAL) at
+		// methodAddress(i), then IMPORTED stubs at methodAddress(methods.size()+j).
+		// Bodied methods' callees were collected while emitting instruction call
+		// targets (buildBodies), so call graph and per-instruction data can never
+		// disagree; the bodyless ones (failed class, oversized) are collected here,
+		// in the same ticked loop (a separate silent pre-pass left the bar at 0/N
+		// for its whole duration on apps with many failed classes). All collection
+		// still finishes before the IMPORTED stubs are appended below, so with
+		// imports on that set is complete when the stubs are numbered.
 		for (int i = 0; i < methods.size(); i++) {
-			checkCancelledEvery(i);
+			tick(i, methods.size(), 255);
 			if (blocksByMethod.get(i).isEmpty()) {
 				try {
+					Set<Integer> callees = calleesByMethod.get(i);
 					for (BlockNode b : rawBlocks(methods.get(i))) {
 						for (InsnNode insn : b.getInstructions()) {
-							collectCallees(insn, calleesByMethod.get(i));
+							collectCallees(insn, callees);
 						}
 					}
 				} catch (Throwable t) {
@@ -751,12 +765,6 @@ public final class Exporter {
 					// keep the callees collected so far instead of killing the export.
 				}
 			}
-		}
-
-		// 2. Vertices in ascending-address order: in-app methods (NORMAL) at
-		// methodAddress(i), then IMPORTED stubs at methodAddress(methods.size()+j).
-		for (int i = 0; i < methods.size(); i++) {
-			tick(i, methods.size(), 255);
 			MethodNode mth = methods.get(i);
 			String rawId = rawId(mth);
 			BinExport2.CallGraph.Vertex.Builder v = BinExport2.CallGraph.Vertex.newBuilder()
@@ -783,7 +791,7 @@ public final class Exporter {
 			}
 		}
 
-		// 3. Edges (targets are vertex indices: in-app methods and IMPORTED stubs).
+		// 2. Edges (targets are vertex indices: in-app methods and IMPORTED stubs).
 		for (int i = 0; i < methods.size(); i++) {
 			checkCancelledEvery(i);
 			for (int t : calleesByMethod.get(i)) {
@@ -821,7 +829,9 @@ public final class Exporter {
 		}
 		// Misses (external callees, the common case) are cached via sentinel -
 		// computeIfAbsent would drop a null mapping and recompute every time.
-		int idx = calleeIdxCache.computeIfAbsent(callee, c -> {
+		// Return the map's cached box: this runs per invoke OCCURRENCE (hot path),
+		// and an unbox-compare-rebox would allocate a fresh Integer per call.
+		Integer idx = calleeIdxCache.computeIfAbsent(callee, c -> {
 			String rid = calleeRawId(c);
 			Integer i = methodIndexByRawId.get(rid);
 			if (i != null) {
@@ -832,14 +842,9 @@ public final class Exporter {
 			}
 			// External, imports on: give it an IMPORTED vertex index (methods.size()
 			// + j), assigned in first-encounter order (deterministic sweep).
-			Integer j = importedByRawId.get(rid);
-			if (j == null) {
-				j = importedByRawId.size();
-				importedByRawId.put(rid, j);
-			}
-			return methods.size() + j;
+			return methods.size() + importedByRawId.computeIfAbsent(rid, r -> importedByRawId.size());
 		});
-		return idx == NOT_IN_APP ? null : idx;
+		return idx.intValue() == NOT_IN_APP ? null : idx;
 	}
 
 	private int moduleIndex(ClassNode cls) {
@@ -861,11 +866,15 @@ public final class Exporter {
 		// Two .BinExport files are only comparable when produced by the same
 		// jadx version (IR normalization/folding differ). Meta is display-only
 		// for BinDiff, so carrying the version in architecture_name surfaces a
-		// mismatch right in the BinDiff UI / results DB.
+		// mismatch right in the BinDiff UI / results DB. The imports setting is
+		// another such comparability axis (it changes call-graph topology), so it
+		// is surfaced the same way - appended only when ON, keeping the default
+		// output byte-identical.
 		be.getMetaInformationBuilder()
 				.setExecutableName(name)
 				.setExecutableId(sha256(input, name))
-				.setArchitectureName("dalvik-jadx-" + Jadx.getVersion())
+				.setArchitectureName("dalvik-jadx-" + Jadx.getVersion()
+						+ (includeImports ? "+imports" : ""))
 				.setTimestamp(System.currentTimeMillis() / 1000);
 	}
 

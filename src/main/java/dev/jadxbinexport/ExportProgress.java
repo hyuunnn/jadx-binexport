@@ -34,4 +34,13 @@ public interface ExportProgress {
 	default boolean cancelled() {
 		return false;
 	}
+
+	/**
+	 * A non-fatal advisory the work wants the user to see (e.g. the two sides of
+	 * a diff were exported with different {@code imports} settings). The work
+	 * continues; sinks that can reach the user should surface it - a log-only
+	 * warning is invisible in the GUI.
+	 */
+	default void warn(String message) {
+	}
 }
