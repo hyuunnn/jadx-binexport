@@ -72,41 +72,36 @@ final class BinDiffResultsPanel {
 			return;
 		}
 		File other = chooser.getSelectedFile();
+		// One worker runs export -> bindiff -> read-results -> show, driving a
+		// single progress dialog (with Cancel) across the whole flow.
+		ExportProgressDialog progress =
+				new ExportProgressDialog(gui.getMainFrame(), "Diff against " + other.getName());
 		new Thread(() -> {
 			try {
-				File binDiff = BinDiffRunner.diff(context.getDecompiler(), other, options);
-				loadAndShow(context, binDiff);
+				File binDiff = BinDiffRunner.diff(context.getDecompiler(), other, options, progress);
+				progress.stage("Loading results…", 0);
+				List<BinDiffResults.Match> matches = BinDiffResults.loadMatches(binDiff);
+				BinDiffResults.Header header = BinDiffResults.loadHeader(binDiff);
+				Map<String, MethodNode> index = BinDiffResults.methodIndex(context.getDecompiler());
+				if (progress.cancelled()) {
+					throw new Exporter.CancelledException(); // cancelled during the load
+				}
+				progress.close();
+				gui.uiRun(() -> show(gui, binDiff, matches, header, index));
 			} catch (BinDiffRunner.BinDiffNotFound nf) {
+				progress.close();
 				gui.uiRun(() -> JOptionPane.showMessageDialog(gui.getMainFrame(),
 						nf.getMessage(), "BinDiff not found", JOptionPane.WARNING_MESSAGE));
+			} catch (Exporter.CancelledException c) {
+				progress.close();
+				LOG.info("[BinExport] diff cancelled by user");
 			} catch (Throwable t) {
+				progress.close();
 				LOG.error("[BinExport] diff against {} failed", other, t);
 				gui.uiRun(() -> JOptionPane.showMessageDialog(gui.getMainFrame(),
 						"Diff failed:\n" + t.getMessage(), "BinDiff", JOptionPane.ERROR_MESSAGE));
 			}
 		}, "binexport-diff").start();
-	}
-
-	/** Reads a {@code .BinDiff}, indexes the current app, and shows the table. */
-	static void loadAndShow(JadxPluginContext context, File file) {
-		JadxGuiContext gui = context.getGuiContext();
-		if (gui == null) {
-			return;
-		}
-		// Parse + index off the EDT; the DB read and class walk can be slow.
-		new Thread(() -> {
-			try {
-				List<BinDiffResults.Match> matches = BinDiffResults.loadMatches(file);
-				BinDiffResults.Header header = BinDiffResults.loadHeader(file);
-				Map<String, MethodNode> index = BinDiffResults.methodIndex(context.getDecompiler());
-				gui.uiRun(() -> show(gui, file, matches, header, index));
-			} catch (Throwable t) {
-				LOG.error("[BinExport] failed to load BinDiff results from {}", file, t);
-				gui.uiRun(() -> JOptionPane.showMessageDialog(gui.getMainFrame(),
-						"Failed to read BinDiff results:\n" + t.getMessage(),
-						"BinDiff results", JOptionPane.ERROR_MESSAGE));
-			}
-		}, "binexport-load-results").start();
 	}
 
 	private static void show(JadxGuiContext gui, File file, List<BinDiffResults.Match> matches,

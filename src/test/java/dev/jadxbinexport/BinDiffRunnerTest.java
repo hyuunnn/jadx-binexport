@@ -3,6 +3,7 @@ package dev.jadxbinexport;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -73,6 +74,49 @@ class BinDiffRunnerTest {
 			System.out.println("[runner] in-plugin diff produced " + matches.size()
 					+ " matches, " + resolved + " navigable in the open app");
 		}
+	}
+
+	/**
+	 * Cancelling while bindiff is running must abort the diff (kill the process,
+	 * throw {@link Exporter.CancelledException}) rather than run to completion -
+	 * the fix for "Cancel only worked during the export phase".
+	 */
+	@Test
+	void cancelDuringBindiffAborts(@TempDir Path tmp) throws Exception {
+		assumeTrue(BinDiffRunner.findBindiff(null) != null, "bindiff not found");
+
+		Path classes = compile(tmp);
+		File otherBinExport = tmp.resolve("other.BinExport").toFile();
+		exportBinExport(classes, tmp.resolve("jadx-b"), otherBinExport);
+
+		// Reports false during the export stage, then true once bindiff starts, so
+		// only the "Running BinDiff…" wait is cancelled (not the export).
+		ExportProgress cancelAtBindiff = new ExportProgress() {
+			private volatile boolean bindiffStarted;
+
+			public void stage(String label, int total) {
+				if (label.contains("BinDiff")) {
+					bindiffStarted = true;
+				}
+			}
+
+			public void update(int done, int total) {
+			}
+
+			public boolean cancelled() {
+				return bindiffStarted;
+			}
+		};
+
+		JadxArgs args = new JadxArgs();
+		args.getInputFiles().add(classes.toFile());
+		args.setOutDir(tmp.resolve("jadx-a").toFile());
+		try (JadxDecompiler jadx = new JadxDecompiler(args)) {
+			jadx.load();
+			assertThrows(Exporter.CancelledException.class,
+					() -> BinDiffRunner.diff(jadx, otherBinExport, null, cancelAtBindiff));
+		}
+		System.out.println("[runner] cancel during bindiff aborted the diff");
 	}
 
 	private static void exportBinExport(Path classes, Path jadxOut, File outFile) throws Exception {

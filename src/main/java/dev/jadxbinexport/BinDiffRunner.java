@@ -62,14 +62,22 @@ final class BinDiffRunner {
 	 */
 	static File diff(JadxDecompiler decompiler, File otherBinExport, BinExportOptions options)
 			throws Exception {
+		return diff(decompiler, otherBinExport, options, ExportProgress.NONE);
+	}
+
+	static File diff(JadxDecompiler decompiler, File otherBinExport, BinExportOptions options,
+			ExportProgress progress) throws Exception {
 		String bindiff = resolveBindiff(options);
 
 		Path work = Files.createTempDirectory("jadx-binexport");
 		try {
 			File current = new File(work.toFile(), "current.BinExport");
-			Exporter.runToFile(decompiler, current);
+			Exporter.runToFile(decompiler, current, progress);
 
-			ProcResult res = runProcess(TimeUnit.MINUTES.toSeconds(DIFF_TIMEOUT_MIN), bindiff,
+			// bindiff has no progress protocol, so show it as an indeterminate stage;
+			// runProcess polls progress.cancelled() so Cancel kills a running bindiff.
+			progress.stage("Running BinDiff…", 0);
+			ProcResult res = runProcess(TimeUnit.MINUTES.toSeconds(DIFF_TIMEOUT_MIN), progress, bindiff,
 					current.getAbsolutePath(), otherBinExport.getAbsolutePath(),
 					"--output_dir", work.toString());
 
@@ -152,7 +160,7 @@ final class BinDiffRunner {
 		try {
 			// bindiff --help exits non-zero (Google-flags CLI), so detect by output
 			// content rather than exit code.
-			ProcResult res = runProcess(PROBE_TIMEOUT_SEC, cmd, "--help");
+			ProcResult res = runProcess(PROBE_TIMEOUT_SEC, ExportProgress.NONE, cmd, "--help");
 			return res.output.toLowerCase(Locale.ROOT).contains("bindiff");
 		} catch (Exception ignored) {
 			return false;
@@ -162,9 +170,13 @@ final class BinDiffRunner {
 	/**
 	 * Runs a subprocess, draining its (merged) output on a separate thread so a
 	 * full pipe buffer can't block the child, and bounding it with a timeout so a
-	 * wedged process is force-killed instead of hanging the caller forever.
+	 * wedged process is force-killed instead of hanging the caller forever. Polls
+	 * {@code progress.cancelled()} while waiting so the user can abort a running
+	 * bindiff mid-flight (the process is killed, not just ignored).
 	 */
-	private static ProcResult runProcess(long timeoutSeconds, String... cmd) throws Exception {
+	private static ProcResult runProcess(long timeoutSeconds, ExportProgress progress, String... cmd)
+			throws Exception {
+		ExportProgress prog = progress != null ? progress : ExportProgress.NONE;
 		Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
 		StringBuilder out = new StringBuilder();
 		Thread reader = new Thread(() -> {
@@ -176,10 +188,23 @@ final class BinDiffRunner {
 		}, "bindiff-reader");
 		reader.setDaemon(true);
 		reader.start();
-		if (!p.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
-			p.destroyForcibly();
-			p.waitFor(5, TimeUnit.SECONDS);
-			reader.join(1000); // already failing; don't block the caller further
+
+		// Poll in short slices: react to a cancel request or the deadline without
+		// blocking for the whole timeout on a single waitFor.
+		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
+		boolean exited = false;
+		while (System.nanoTime() < deadline) {
+			if (prog.cancelled()) {
+				killAndDrain(p, reader);
+				throw new Exporter.CancelledException();
+			}
+			if (p.waitFor(200, TimeUnit.MILLISECONDS)) {
+				exited = true;
+				break;
+			}
+		}
+		if (!exited) {
+			killAndDrain(p, reader);
 			throw new IllegalStateException(
 					"bindiff timed out after " + timeoutSeconds + "s: " + String.join(" ", cmd));
 		}
@@ -188,6 +213,13 @@ final class BinDiffRunner {
 		// published) before we read it - a bounded join could race the append.
 		reader.join();
 		return new ProcResult(p.exitValue(), out.toString());
+	}
+
+	/** Force-kills a process and waits briefly for it and its reader to settle. */
+	private static void killAndDrain(Process p, Thread reader) throws InterruptedException {
+		p.destroyForcibly();
+		p.waitFor(5, TimeUnit.SECONDS);
+		reader.join(1000); // already tearing down; don't block the caller further
 	}
 
 	private static void deleteRecursively(Path dir) {

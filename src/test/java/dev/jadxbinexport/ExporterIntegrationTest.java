@@ -1,12 +1,16 @@
 package dev.jadxbinexport;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.function.Predicate;
 
 import javax.tools.JavaCompiler;
@@ -138,6 +142,71 @@ class ExporterIntegrationTest {
 				+ " flowGraphs=" + be.getFlowGraphCount()
 				+ " mnemonics=" + be.getMnemonicCount()
 				+ " backEdge=" + anyBackEdge);
+	}
+
+	/**
+	 * The GUI progress path: the exporter must report named stages with in-range
+	 * counts, and a cancel request must abort promptly WITHOUT writing a file
+	 * (the file is written only after all building, so an aborted run leaves
+	 * nothing behind).
+	 */
+	@Test
+	void reportsProgressAndHonorsCancellation(@TempDir Path tmp) throws Exception {
+		Path classesDir = compileSample(tmp);
+		JadxArgs args = new JadxArgs();
+		args.getInputFiles().add(classesDir.toFile());
+		args.setOutDir(tmp.resolve("jadx-out").toFile());
+		System.setProperty("binexport.output", tmp.resolve("passthrough.BinExport").toString());
+		try (JadxDecompiler jadx = new JadxDecompiler(args)) {
+			jadx.load(); // after-load pass exports once with ExportProgress.NONE
+
+			// 1. A recording sink sees both stages and valid update counts.
+			List<String> stages = new ArrayList<>();
+			boolean[] updated = {false};
+			ExportProgress recorder = new ExportProgress() {
+				public void stage(String label, int total) {
+					stages.add(label);
+				}
+
+				public void update(int done, int total) {
+					if (done >= 0 && done <= total && total > 0) {
+						updated[0] = true;
+					}
+				}
+
+				public boolean cancelled() {
+					return false;
+				}
+			};
+			Path recorded = tmp.resolve("recorded.BinExport");
+			Exporter.runToFile(jadx, recorded.toFile(), recorder);
+			assertTrue(Files.isRegularFile(recorded), "export should complete");
+			assertTrue(stages.stream().anyMatch(s -> s.contains("Decompiling")),
+					"expected a class-decompilation stage, got: " + stages);
+			assertTrue(stages.stream().anyMatch(s -> s.contains("flow graph")),
+					"expected a flow-graph stage, got: " + stages);
+			assertTrue(updated[0], "update() should be called with in-range counts");
+
+			// 2. A cancel request aborts with CancelledException and writes nothing.
+			Path cancelled = tmp.resolve("cancelled.BinExport");
+			ExportProgress cancelling = new ExportProgress() {
+				public void stage(String label, int total) {
+				}
+
+				public void update(int done, int total) {
+				}
+
+				public boolean cancelled() {
+					return true;
+				}
+			};
+			assertThrows(Exporter.CancelledException.class,
+					() -> Exporter.runToFile(jadx, cancelled.toFile(), cancelling));
+			assertFalse(Files.exists(cancelled), "a cancelled export must not write a file");
+		} finally {
+			System.clearProperty("binexport.output");
+		}
+		System.out.println("[progress] stages reported + cancellation honored (no file written)");
 	}
 
 	private static boolean anyFlowEdge(BinExport2 be, Predicate<BinExport2.FlowGraph.Edge> pred) {

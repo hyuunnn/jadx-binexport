@@ -91,6 +91,7 @@ public final class Exporter {
 
 	private final BinExportOptions options;
 	private File explicitOutput;
+	private ExportProgress progress = ExportProgress.NONE;
 
 	private final List<MethodNode> methods = new ArrayList<>();
 	// MethodInfo.getRawFullId() rebuilds its string on every call and is used in
@@ -125,6 +126,13 @@ public final class Exporter {
 	private final Map<String, Integer> mnemonicIdx = new HashMap<>();
 	private final Map<String, Integer> moduleIdx = new HashMap<>();
 
+	/** Thrown from {@link #export} when the user cancels via {@link ExportProgress}. */
+	public static final class CancelledException extends RuntimeException {
+		CancelledException() {
+			super("export cancelled");
+		}
+	}
+
 	private Exporter(BinExportOptions options) {
 		// A fresh options instance resolves everything from the legacy system
 		// properties, so library callers without registered options still work.
@@ -137,13 +145,25 @@ public final class Exporter {
 	}
 
 	public static File run(JadxDecompiler decompiler, BinExportOptions options) {
-		return new Exporter(options).exportLocked(decompiler);
+		return run(decompiler, options, ExportProgress.NONE);
+	}
+
+	/** Exports with progress reporting / cancellation (see {@link ExportProgress}). */
+	public static File run(JadxDecompiler decompiler, BinExportOptions options, ExportProgress progress) {
+		Exporter e = new Exporter(options);
+		e.progress = progress != null ? progress : ExportProgress.NONE;
+		return e.exportLocked(decompiler);
 	}
 
 	/** Exports to an explicit file, bypassing option/sysprop path resolution. */
 	public static File runToFile(JadxDecompiler decompiler, File out) {
+		return runToFile(decompiler, out, ExportProgress.NONE);
+	}
+
+	public static File runToFile(JadxDecompiler decompiler, File out, ExportProgress progress) {
 		Exporter e = new Exporter(null);
 		e.explicitOutput = out;
+		e.progress = progress != null ? progress : ExportProgress.NONE;
 		return e.exportLocked(decompiler);
 	}
 
@@ -161,6 +181,8 @@ public final class Exporter {
 	public static void runLogged(JadxDecompiler decompiler, BinExportOptions options) {
 		try {
 			run(decompiler, options);
+		} catch (CancelledException c) {
+			LOG.info("[BinExport] export cancelled");
 		} catch (Throwable t) {
 			LOG.error("[BinExport] export failed", t);
 		}
@@ -172,8 +194,18 @@ public final class Exporter {
 		// classes flagged DONT_GENERATE (deduplicated multidex entries, synthetic
 		// holders), losing their call-graph vertices.
 		Set<ClassNode> visited = Collections.newSetFromMap(new IdentityHashMap<>());
-		for (ClassNode cls : decompiler.getRoot().getClasses()) {
-			collect(cls, visited);
+		List<ClassNode> topClasses = decompiler.getRoot().getClasses();
+		progress.stage("Decompiling classes", topClasses.size());
+		for (int i = 0; i < topClasses.size(); i++) {
+			if (progress.cancelled()) {
+				throw new CancelledException();
+			}
+			collect(topClasses.get(i), visited);
+			// Throttle UI updates: forceProcess dominates the runtime, but there can
+			// be tens of thousands of classes, so don't post an EDT event per class.
+			if ((i & 63) == 0 || i == topClasses.size() - 1) {
+				progress.update(i + 1, topClasses.size());
+			}
 		}
 
 		// 2. Deterministic method ordering => stable synthetic addresses. Drop
@@ -356,7 +388,14 @@ public final class Exporter {
 	// --- Instructions / basic blocks / flow graphs ---------------------------
 
 	private void buildBodies() {
+		progress.stage("Building flow graphs", methods.size());
 		for (int mi = 0; mi < methods.size(); mi++) {
+			if (progress.cancelled()) {
+				throw new CancelledException();
+			}
+			if ((mi & 255) == 0) {
+				progress.update(mi, methods.size());
+			}
 			MethodNode mth = methods.get(mi);
 			List<BlockNode> blocks = blocksByMethod.get(mi);
 			if (blocks.isEmpty()) {
