@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 
 import org.slf4j.Logger;
@@ -151,7 +152,7 @@ public final class Exporter {
 	/** Exports with progress reporting / cancellation (see {@link ExportProgress}). */
 	public static File run(JadxDecompiler decompiler, BinExportOptions options, ExportProgress progress) {
 		Exporter e = new Exporter(options);
-		e.progress = progress != null ? progress : ExportProgress.NONE;
+		e.progress = ExportProgress.orNone(progress);
 		return e.exportLocked(decompiler);
 	}
 
@@ -163,17 +164,49 @@ public final class Exporter {
 	public static File runToFile(JadxDecompiler decompiler, File out, ExportProgress progress) {
 		Exporter e = new Exporter(null);
 		e.explicitOutput = out;
-		e.progress = progress != null ? progress : ExportProgress.NONE;
+		e.progress = ExportProgress.orNone(progress);
 		return e.exportLocked(decompiler);
 	}
 
-	/** Serializes model-mutating exports against each other (see EXPORT_LOCK). */
+	/**
+	 * Serializes model-mutating exports against each other (see EXPORT_LOCK).
+	 * Polls cancellation while waiting for the lock so a queued export/diff can
+	 * be cancelled without waiting for the in-flight one to finish.
+	 */
 	private File exportLocked(JadxDecompiler decompiler) {
-		EXPORT_LOCK.lock();
+		try {
+			while (!EXPORT_LOCK.tryLock(200, TimeUnit.MILLISECONDS)) {
+				if (progress.cancelled()) {
+					throw new CancelledException();
+				}
+			}
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw new CancelledException();
+		}
 		try {
 			return export(decompiler);
 		} finally {
 			EXPORT_LOCK.unlock();
+		}
+	}
+
+	/** Throws if the user asked to cancel; called at each phase boundary. */
+	private void checkCancelled() {
+		if (progress.cancelled()) {
+			throw new CancelledException();
+		}
+	}
+
+	/**
+	 * Per-iteration cancel poll + throttled progress update for the two big
+	 * loops. {@code done} is 0-based; the bar is advanced to {@code done + 1} and
+	 * always flushed on the final item so it visibly reaches the total.
+	 */
+	private void tick(int done, int total, int mask) {
+		checkCancelled();
+		if ((done & mask) == 0 || done == total - 1) {
+			progress.update(done + 1, total);
 		}
 	}
 
@@ -197,15 +230,10 @@ public final class Exporter {
 		List<ClassNode> topClasses = decompiler.getRoot().getClasses();
 		progress.stage("Decompiling classes", topClasses.size());
 		for (int i = 0; i < topClasses.size(); i++) {
-			if (progress.cancelled()) {
-				throw new CancelledException();
-			}
+			// forceProcess dominates the runtime; tick() throttles the UI update
+			// (there can be tens of thousands of classes) and polls for cancel.
+			tick(i, topClasses.size(), 63);
 			collect(topClasses.get(i), visited);
-			// Throttle UI updates: forceProcess dominates the runtime, but there can
-			// be tens of thousands of classes, so don't post an EDT event per class.
-			if ((i & 63) == 0 || i == topClasses.size() - 1) {
-				progress.update(i + 1, topClasses.size());
-			}
 		}
 
 		// 2. Deterministic method ordering => stable synthetic addresses. Drop
@@ -225,15 +253,23 @@ public final class Exporter {
 		}
 		methods.clear();
 		methods.addAll(deduped);
+		checkCancelled();
 		resolveBodies();
 
-		// 3. Global tables and graphs (order matters for index bookkeeping).
+		// 3. Global tables and graphs (order matters for index bookkeeping). Cancel
+		// is polled at each phase boundary (and per-item inside the big loops) so a
+		// late cancel still aborts BEFORE the file is written - the whole point of
+		// the Cancel button is that a cancelled export leaves nothing behind.
+		checkCancelled();
 		buildMnemonics();
 		buildBodies();
 		buildCallGraph();
 		buildMeta(decompiler.getArgs());
 
-		// 4. Serialize.
+		// 4. Serialize. Last cancel gate is right before the write, so a cancel any
+		// time before this leaves no file on disk.
+		progress.stage("Writing file", 0);
+		checkCancelled();
 		File out = explicitOutput != null ? explicitOutput : resolveOutputFile(decompiler.getArgs());
 		File parent = out.getParentFile();
 		if (parent != null) {
@@ -295,8 +331,11 @@ public final class Exporter {
 	 * being unique within the file).
 	 */
 	private void resolveBodies() {
-		for (MethodNode mth : methods) {
-			blocksByMethod.add(resolveBlocks(mth));
+		for (int i = 0; i < methods.size(); i++) {
+			if ((i & 255) == 0) {
+				checkCancelled();
+			}
+			blocksByMethod.add(resolveBlocks(methods.get(i)));
 			calleesByMethod.add(new LinkedHashSet<>());
 		}
 	}
@@ -390,12 +429,7 @@ public final class Exporter {
 	private void buildBodies() {
 		progress.stage("Building flow graphs", methods.size());
 		for (int mi = 0; mi < methods.size(); mi++) {
-			if (progress.cancelled()) {
-				throw new CancelledException();
-			}
-			if ((mi & 255) == 0) {
-				progress.update(mi, methods.size());
-			}
+			tick(mi, methods.size(), 255);
 			MethodNode mth = methods.get(mi);
 			List<BlockNode> blocks = blocksByMethod.get(mi);
 			if (blocks.isEmpty()) {
@@ -655,10 +689,12 @@ public final class Exporter {
 
 	private void buildCallGraph() {
 		BinExport2.CallGraph.Builder cg = be.getCallGraphBuilder();
+		progress.stage("Building call graph", methods.size());
 
 		// Vertices, in method-index order => addresses are strictly ascending,
 		// which BinDiff requires.
 		for (int i = 0; i < methods.size(); i++) {
+			tick(i, methods.size(), 255);
 			MethodNode mth = methods.get(i);
 			String rawId = rawId(mth);
 			BinExport2.CallGraph.Vertex.Builder v = BinExport2.CallGraph.Vertex.newBuilder()
@@ -677,6 +713,9 @@ public final class Exporter {
 		// never disagree. Bodyless methods (failed class, oversized) still
 		// contribute call edges from whatever IR is available.
 		for (int i = 0; i < methods.size(); i++) {
+			if ((i & 255) == 0) {
+				checkCancelled();
+			}
 			Set<Integer> callees = calleesByMethod.get(i);
 			if (blocksByMethod.get(i).isEmpty()) {
 				try {

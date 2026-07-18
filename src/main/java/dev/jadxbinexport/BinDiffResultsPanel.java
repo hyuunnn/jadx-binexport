@@ -73,35 +73,42 @@ final class BinDiffResultsPanel {
 		}
 		File other = chooser.getSelectedFile();
 		// One worker runs export -> bindiff -> read-results -> show, driving a
-		// single progress dialog (with Cancel) across the whole flow.
+		// single progress dialog (with Cancel) across the whole flow. A finally
+		// closes the dialog on every path, and the start() is guarded so a failure
+		// to spawn the thread can't leave the dialog stuck on screen.
 		ExportProgressDialog progress =
 				new ExportProgressDialog(gui.getMainFrame(), "Diff against " + other.getName());
-		new Thread(() -> {
+		Thread worker = new Thread(() -> {
 			try {
 				File binDiff = BinDiffRunner.diff(context.getDecompiler(), other, options, progress);
 				progress.stage("Loading results…", 0);
+				if (progress.cancelled()) {
+					throw new Exporter.CancelledException();
+				}
 				List<BinDiffResults.Match> matches = BinDiffResults.loadMatches(binDiff);
 				BinDiffResults.Header header = BinDiffResults.loadHeader(binDiff);
-				Map<String, MethodNode> index = BinDiffResults.methodIndex(context.getDecompiler());
-				if (progress.cancelled()) {
-					throw new Exporter.CancelledException(); // cancelled during the load
-				}
-				progress.close();
+				// Pass the sink so the (slow, on a big app) class walk polls cancel.
+				Map<String, MethodNode> index = BinDiffResults.methodIndex(context.getDecompiler(), progress);
 				gui.uiRun(() -> show(gui, binDiff, matches, header, index));
 			} catch (BinDiffRunner.BinDiffNotFound nf) {
-				progress.close();
 				gui.uiRun(() -> JOptionPane.showMessageDialog(gui.getMainFrame(),
 						nf.getMessage(), "BinDiff not found", JOptionPane.WARNING_MESSAGE));
 			} catch (Exporter.CancelledException c) {
-				progress.close();
 				LOG.info("[BinExport] diff cancelled by user");
 			} catch (Throwable t) {
-				progress.close();
 				LOG.error("[BinExport] diff against {} failed", other, t);
 				gui.uiRun(() -> JOptionPane.showMessageDialog(gui.getMainFrame(),
 						"Diff failed:\n" + t.getMessage(), "BinDiff", JOptionPane.ERROR_MESSAGE));
+			} finally {
+				progress.close();
 			}
-		}, "binexport-diff").start();
+		}, "binexport-diff");
+		try {
+			worker.start();
+		} catch (Throwable t) {
+			progress.close();
+			throw t;
+		}
 	}
 
 	private static void show(JadxGuiContext gui, File file, List<BinDiffResults.Match> matches,

@@ -3,7 +3,6 @@ package dev.jadxbinexport;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -66,7 +65,8 @@ final class BinDiffRunner {
 	}
 
 	static File diff(JadxDecompiler decompiler, File otherBinExport, BinExportOptions options,
-			ExportProgress progress) throws Exception {
+			ExportProgress progressArg) throws Exception {
+		ExportProgress progress = ExportProgress.orNone(progressArg);
 		String bindiff = resolveBindiff(options);
 
 		Path work = Files.createTempDirectory("jadx-binexport");
@@ -174,39 +174,43 @@ final class BinDiffRunner {
 	 * {@code progress.cancelled()} while waiting so the user can abort a running
 	 * bindiff mid-flight (the process is killed, not just ignored).
 	 */
-	private static ProcResult runProcess(long timeoutSeconds, ExportProgress progress, String... cmd)
+	static ProcResult runProcess(long timeoutSeconds, ExportProgress progress, String... cmd)
 			throws Exception {
-		ExportProgress prog = progress != null ? progress : ExportProgress.NONE;
 		Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
 		StringBuilder out = new StringBuilder();
 		Thread reader = new Thread(() -> {
 			try (InputStream in = p.getInputStream()) {
 				out.append(new String(in.readAllBytes(), StandardCharsets.UTF_8));
 			} catch (IOException e) {
-				throw new UncheckedIOException(e);
+				// Expected when the process is force-killed on cancel/timeout: the
+				// stream closes mid-read. Not a failure - don't dump a stack trace.
+				LOG.debug("[BinExport] bindiff output read ended early: {}", e.toString());
 			}
 		}, "bindiff-reader");
 		reader.setDaemon(true);
 		reader.start();
 
-		// Poll in short slices: react to a cancel request or the deadline without
-		// blocking for the whole timeout on a single waitFor.
+		// Poll in short slices so a cancel request or the deadline is acted on
+		// within ~200ms, but always check the EXIT first: a process that finished
+		// must never be reported as timed-out or discarded because a cancel raced
+		// its completion. (deadline - now) is the overflow-safe nanoTime compare.
 		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
-		boolean exited = false;
-		while (System.nanoTime() < deadline) {
-			if (prog.cancelled()) {
-				killAndDrain(p, reader);
-				throw new Exporter.CancelledException();
+		try {
+			while (!p.waitFor(200, TimeUnit.MILLISECONDS)) {
+				if (progress.cancelled()) {
+					killAndDrain(p, reader);
+					throw new Exporter.CancelledException();
+				}
+				if (deadline - System.nanoTime() <= 0) {
+					killAndDrain(p, reader);
+					throw new IllegalStateException(
+							"bindiff timed out after " + timeoutSeconds + "s: " + String.join(" ", cmd));
+				}
 			}
-			if (p.waitFor(200, TimeUnit.MILLISECONDS)) {
-				exited = true;
-				break;
-			}
-		}
-		if (!exited) {
-			killAndDrain(p, reader);
-			throw new IllegalStateException(
-					"bindiff timed out after " + timeoutSeconds + "s: " + String.join(" ", cmd));
+		} catch (InterruptedException e) {
+			killAndDrain(p, reader); // don't orphan the child if the worker is interrupted
+			Thread.currentThread().interrupt();
+			throw e;
 		}
 		// The process has exited, so its stdout is at EOF and the reader returns
 		// promptly; join without a timeout so out is fully written (and safely
@@ -218,7 +222,11 @@ final class BinDiffRunner {
 	/** Force-kills a process and waits briefly for it and its reader to settle. */
 	private static void killAndDrain(Process p, Thread reader) throws InterruptedException {
 		p.destroyForcibly();
-		p.waitFor(5, TimeUnit.SECONDS);
+		if (!p.waitFor(5, TimeUnit.SECONDS)) {
+			// Rare (e.g. uninterruptible I/O on Windows): the still-live process may
+			// keep temp files locked, so the caller's cleanup can leak - flag it.
+			LOG.warn("[BinExport] bindiff did not terminate after destroyForcibly()");
+		}
 		reader.join(1000); // already tearing down; don't block the caller further
 	}
 

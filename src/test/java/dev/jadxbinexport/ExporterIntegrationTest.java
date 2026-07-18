@@ -187,22 +187,30 @@ class ExporterIntegrationTest {
 					"expected a flow-graph stage, got: " + stages);
 			assertTrue(updated[0], "update() should be called with in-range counts");
 
-			// 2. A cancel request aborts with CancelledException and writes nothing.
+			// 2. A LATE cancel (arriving only once the export has reached its final
+			//    "Writing file" stage, i.e. after collect/buildBodies/buildCallGraph)
+			//    must still abort with CancelledException and write no file. This
+			//    exercises the post-buildBodies cancel gate, not just a cancel at t=0.
 			Path cancelled = tmp.resolve("cancelled.BinExport");
-			ExportProgress cancelling = new ExportProgress() {
-				public void stage(String label, int total) {
-				}
+			boolean[] sawWriteStage = {false};
+			ExportProgress cancelAtWrite = new ExportProgress() {
+				private volatile boolean writing;
 
-				public void update(int done, int total) {
+				public void stage(String label, int total) {
+					if (label.contains("Writing")) {
+						writing = true;
+						sawWriteStage[0] = true;
+					}
 				}
 
 				public boolean cancelled() {
-					return true;
+					return writing;
 				}
 			};
 			assertThrows(Exporter.CancelledException.class,
-					() -> Exporter.runToFile(jadx, cancelled.toFile(), cancelling));
-			assertFalse(Files.exists(cancelled), "a cancelled export must not write a file");
+					() -> Exporter.runToFile(jadx, cancelled.toFile(), cancelAtWrite));
+			assertTrue(sawWriteStage[0], "export should have reached the Writing stage before cancel");
+			assertFalse(Files.exists(cancelled), "a late-cancelled export must not write a file");
 		} finally {
 			System.clearProperty("binexport.output");
 		}

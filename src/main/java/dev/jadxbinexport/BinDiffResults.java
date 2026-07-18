@@ -100,10 +100,24 @@ public final class BinDiffResults {
 	 * constructors) so the keys line up with the exported {@code mangled_name}s.
 	 */
 	public static Map<String, MethodNode> methodIndex(JadxDecompiler decompiler) {
+		return methodIndex(decompiler, ExportProgress.NONE);
+	}
+
+	/**
+	 * As {@link #methodIndex(JadxDecompiler)} but polls {@code progress} so the
+	 * "Loading results…" class walk (slow on a big app) can be cancelled instead
+	 * of only being discarded after it finishes.
+	 */
+	public static Map<String, MethodNode> methodIndex(JadxDecompiler decompiler, ExportProgress progress) {
+		ExportProgress prog = ExportProgress.orNone(progress);
 		Map<String, MethodNode> index = new HashMap<>();
 		Set<ClassNode> visited = Collections.newSetFromMap(new IdentityHashMap<>());
-		for (ClassNode cls : decompiler.getRoot().getClasses()) {
-			indexClass(cls, visited, index);
+		List<ClassNode> classes = decompiler.getRoot().getClasses();
+		for (int i = 0; i < classes.size(); i++) {
+			if ((i & 255) == 0 && prog.cancelled()) {
+				throw new Exporter.CancelledException();
+			}
+			indexClass(classes.get(i), visited, index);
 		}
 		return index;
 	}

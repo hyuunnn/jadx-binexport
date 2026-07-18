@@ -2,6 +2,8 @@ package dev.jadxbinexport;
 
 import java.awt.BorderLayout;
 import java.awt.Dimension;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
 
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
@@ -11,6 +13,7 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JProgressBar;
 import javax.swing.SwingUtilities;
+import javax.swing.WindowConstants;
 
 /**
  * A small modeless progress dialog with a Cancel button, used to view export /
@@ -46,10 +49,21 @@ final class ExportProgressDialog implements ExportProgress {
 		bar.setStringPainted(true);
 		note = new JLabel("Starting…");
 		JButton cancel = new JButton("Cancel");
-		cancel.addActionListener(e -> {
+		Runnable requestCancel = () -> {
 			cancelled = true;
 			note.setText("Cancelling…");
 			cancel.setEnabled(false);
+		};
+		cancel.addActionListener(e -> requestCancel.run());
+		// Closing via the title-bar X is the natural "stop this" gesture, so make
+		// it request cancel too (not the default HIDE_ON_CLOSE, which would hide
+		// the dialog while the export kept running invisibly).
+		dialog.setDefaultCloseOperation(WindowConstants.DO_NOTHING_ON_CLOSE);
+		dialog.addWindowListener(new WindowAdapter() {
+			@Override
+			public void windowClosing(WindowEvent e) {
+				requestCancel.run();
+			}
 		});
 
 		JPanel content = new JPanel(new BorderLayout(8, 10));

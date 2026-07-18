@@ -77,46 +77,25 @@ class BinDiffRunnerTest {
 	}
 
 	/**
-	 * Cancelling while bindiff is running must abort the diff (kill the process,
-	 * throw {@link Exporter.CancelledException}) rather than run to completion -
-	 * the fix for "Cancel only worked during the export phase".
+	 * Directly exercises the runProcess cancel path against a genuinely long-running
+	 * process (not a sub-second bindiff): a cancel must kill it promptly and throw,
+	 * rather than wait out the full runtime. Deterministic; no bindiff needed.
 	 */
 	@Test
-	void cancelDuringBindiffAborts(@TempDir Path tmp) throws Exception {
-		assumeTrue(BinDiffRunner.findBindiff(null) != null, "bindiff not found");
+	void runProcessKillsRunningProcessOnCancel() throws Exception {
+		assumeTrue(!System.getProperty("os.name").toLowerCase().startsWith("win"), "needs POSIX sleep");
 
-		Path classes = compile(tmp);
-		File otherBinExport = tmp.resolve("other.BinExport").toFile();
-		exportBinExport(classes, tmp.resolve("jadx-b"), otherBinExport);
-
-		// Reports false during the export stage, then true once bindiff starts, so
-		// only the "Running BinDiff…" wait is cancelled (not the export).
-		ExportProgress cancelAtBindiff = new ExportProgress() {
-			private volatile boolean bindiffStarted;
-
-			public void stage(String label, int total) {
-				if (label.contains("BinDiff")) {
-					bindiffStarted = true;
-				}
-			}
-
-			public void update(int done, int total) {
-			}
-
+		ExportProgress alwaysCancel = new ExportProgress() {
 			public boolean cancelled() {
-				return bindiffStarted;
+				return true;
 			}
 		};
-
-		JadxArgs args = new JadxArgs();
-		args.getInputFiles().add(classes.toFile());
-		args.setOutDir(tmp.resolve("jadx-a").toFile());
-		try (JadxDecompiler jadx = new JadxDecompiler(args)) {
-			jadx.load();
-			assertThrows(Exporter.CancelledException.class,
-					() -> BinDiffRunner.diff(jadx, otherBinExport, null, cancelAtBindiff));
-		}
-		System.out.println("[runner] cancel during bindiff aborted the diff");
+		long startNanos = System.nanoTime();
+		assertThrows(Exporter.CancelledException.class,
+				() -> BinDiffRunner.runProcess(60, alwaysCancel, "sleep", "30"));
+		long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
+		assertTrue(elapsedMs < 3000, "cancel should kill the process promptly, took " + elapsedMs + "ms");
+		System.out.println("[runner] runProcess cancelled a running process in " + elapsedMs + "ms");
 	}
 
 	private static void exportBinExport(Path classes, Path jadxOut, File outFile) throws Exception {

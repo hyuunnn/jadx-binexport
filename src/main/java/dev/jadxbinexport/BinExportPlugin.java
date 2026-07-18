@@ -66,15 +66,19 @@ public class BinExportPlugin implements JadxPlugin {
 					return;
 				}
 				// A big app takes minutes; show a progress bar with a Cancel button.
-				ExportProgressDialog progress =
-						new ExportProgressDialog(gui.getMainFrame(), "Exporting to BinExport…");
+				// Everything that can throw before the worker's finally runs is inside
+				// this try so `running` is always reset (else the menu is dead until
+				// restart) and any built dialog is closed.
+				ExportProgressDialog progress = null;
 				try {
+					progress = new ExportProgressDialog(gui.getMainFrame(), "Exporting to BinExport…");
+					ExportProgressDialog p = progress;
 					new Thread(() -> {
 						try {
 							// Report where it went / why it failed: the GUI has no out
 							// dir configured, so the resolved path is not obvious and a
 							// log-only failure would be invisible without the Log Viewer.
-							File out = Exporter.run(context.getDecompiler(), options, progress);
+							File out = Exporter.run(context.getDecompiler(), options, p);
 							gui.uiRun(() -> JOptionPane.showMessageDialog(gui.getMainFrame(),
 									"Exported to:\n" + out.getAbsolutePath(),
 									"BinExport", JOptionPane.INFORMATION_MESSAGE));
@@ -86,14 +90,14 @@ public class BinExportPlugin implements JadxPlugin {
 									"Export failed:\n" + t.getMessage(),
 									"BinExport", JOptionPane.ERROR_MESSAGE));
 						} finally {
-							progress.close();
+							p.close();
 							running.set(false);
 						}
 					}, "binexport-export").start();
 				} catch (Throwable t) {
-					// If the thread never started, the finally above never runs -
-					// without this reset the menu action would be dead until restart.
-					progress.close();
+					if (progress != null) {
+						progress.close();
+					}
 					running.set(false);
 					throw t;
 				}

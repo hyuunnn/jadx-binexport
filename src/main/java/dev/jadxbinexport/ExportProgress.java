@@ -7,33 +7,31 @@ package dev.jadxbinexport;
  * path uses {@link #NONE}, keeping {@link Exporter} free of any Swing/GUI
  * dependency and headless-testable.
  *
- * <p>Implementations must be thread-safe: the exporter calls these from its own
- * worker thread, off the Swing EDT.
+ * <p>All methods have no-op defaults so a caller (or test double) overrides only
+ * what it cares about. Implementations must be thread-safe: the exporter calls
+ * these from its own worker thread, off the Swing EDT.
  */
 public interface ExportProgress {
 
 	/** No-op sink for non-interactive (CLI / library) exports. */
 	ExportProgress NONE = new ExportProgress() {
-		@Override
-		public void stage(String label, int total) {
-		}
-
-		@Override
-		public void update(int done, int total) {
-		}
-
-		@Override
-		public boolean cancelled() {
-			return false;
-		}
 	};
 
+	/** Coerces a possibly-null sink to {@link #NONE} so callees never null-check. */
+	static ExportProgress orNone(ExportProgress p) {
+		return p != null ? p : NONE;
+	}
+
 	/** Begins a stage; {@code total <= 0} means the work is indeterminate. */
-	void stage(String label, int total);
+	default void stage(String label, int total) {
+	}
 
 	/** Reports progress within the current stage. */
-	void update(int done, int total);
+	default void update(int done, int total) {
+	}
 
 	/** True once the user asked to cancel; the exporter then aborts promptly. */
-	boolean cancelled();
+	default boolean cancelled() {
+		return false;
+	}
 }
