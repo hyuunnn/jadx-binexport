@@ -27,6 +27,7 @@ import javax.swing.KeyStroke;
 import javax.swing.RowFilter;
 import javax.swing.SortOrder;
 import javax.swing.SwingConstants;
+import javax.swing.WindowConstants;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
 import javax.swing.filechooser.FileNameExtensionFilter;
@@ -68,18 +69,32 @@ final class BinDiffResultsPanel {
 		if (gui == null) {
 			return;
 		}
-		JFileChooser chooser = new JFileChooser();
-		chooser.setDialogTitle("Open the OTHER version's .BinExport to diff against this app");
-		chooser.setFileFilter(new FileNameExtensionFilter("BinExport (*.BinExport)", "BinExport"));
-		if (chooser.showOpenDialog(gui.getMainFrame()) != JFileChooser.APPROVE_OPTION) {
-			return;
-		}
-		File other = chooser.getSelectedFile();
-		// One worker runs export -> bindiff -> read-results -> show, driving a
-		// single progress dialog (with Cancel) that also surfaces advisory
-		// warnings (imports-setting mismatch) modelessly. The one-at-a-time
-		// guard, dialog, worker thread and cancel/error/finally handling live in
-		// ExportProgressDialog.runGuarded, shared with the Export action.
+		// jadx-gui dispatches menu-action runnables on its BACKGROUND executor,
+		// not the EDT - and a JFileChooser realized off-EDT is the classic
+		// intermittent-failure case (L&F model races). Marshal the chooser (and
+		// the runGuarded kickoff) onto the EDT; runGuarded spawns its own worker
+		// so no long work runs there.
+		gui.uiRun(() -> {
+			JFileChooser chooser = new JFileChooser();
+			chooser.setDialogTitle("Open the OTHER version's .BinExport to diff against this app");
+			chooser.setFileFilter(new FileNameExtensionFilter("BinExport (*.BinExport)", "BinExport"));
+			if (chooser.showOpenDialog(gui.getMainFrame()) != JFileChooser.APPROVE_OPTION) {
+				return;
+			}
+			File other = chooser.getSelectedFile();
+			diffAgainst(context, gui, options, other);
+		});
+	}
+
+	/**
+	 * One worker runs export -> bindiff -> read-results -> show, driving a
+	 * single progress dialog (with Cancel) that also surfaces advisory warnings
+	 * (imports-setting mismatch) modelessly. The one-at-a-time guard, dialog,
+	 * worker thread and cancel/error/finally handling live in
+	 * ExportProgressDialog.runGuarded, shared with the Export action.
+	 */
+	private static void diffAgainst(JadxPluginContext context, JadxGuiContext gui,
+			BinExportOptions options, File other) {
 		ExportProgressDialog.runGuarded(gui, DIFF_RUNNING,
 				"Diff against " + other.getName(), "BinDiff", "Diff failed",
 				"A diff is already running; wait for it to finish or cancel it.",
@@ -169,6 +184,13 @@ final class BinDiffResultsPanel {
 		content.add(hint, BorderLayout.SOUTH);
 
 		JDialog dialog = new JDialog(gui.getMainFrame(), "BinDiff results — " + fileName, false);
+		// DISPOSE_ON_CLOSE is load-bearing: the default HIDE_ON_CLOSE only hides,
+		// and AWT keeps every displayable (shown, undisposed) window strongly
+		// reachable via its static allWindows list until dispose() destroys the
+		// peer - this dialog's table model holds MethodNodes -> ClassNode ->
+		// RootNode, i.e. the ENTIRE decompiled model, so a hidden-not-disposed
+		// results window would pin hundreds of MB per diff for the whole session.
+		dialog.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
 		dialog.setContentPane(content);
 		dialog.setSize(820, 520);
 		dialog.setLocationRelativeTo(gui.getMainFrame());

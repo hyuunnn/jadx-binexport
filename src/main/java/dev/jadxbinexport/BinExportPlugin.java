@@ -59,7 +59,9 @@ public class BinExportPlugin implements JadxPlugin {
 			AtomicBoolean running = new AtomicBoolean();
 			gui.addMenuAction("Export to BinExport (.BinExport)", () ->
 					ExportProgressDialog.runGuarded(gui, running, "Exporting to BinExport…",
-							"BinExport", "Export failed", null, "binexport-export", p -> {
+							"BinExport", "Export failed",
+							"An export is already running; wait for it to finish or cancel it.",
+							"binexport-export", p -> {
 								// Report where it went: the GUI has no out dir configured,
 								// so the resolved path is not obvious and a log-only result
 								// would be invisible without the Log Viewer.

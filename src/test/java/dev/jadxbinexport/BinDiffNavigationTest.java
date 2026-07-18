@@ -12,9 +12,6 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
-import javax.tools.JavaCompiler;
-import javax.tools.ToolProvider;
-
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -103,43 +100,17 @@ class BinDiffNavigationTest {
 		assertEquals(0, p.waitFor(), "bindiff exited non-zero");
 	}
 
-	/** Locates bindiff via -Dbinexport.bindiff, then PATH, then common paths. */
+	/**
+	 * Locates bindiff via the production discovery (sysprop, PATH, common paths
+	 * incl. Apple-Silicon Homebrew, 20s-bounded probes) - a hand-rolled copy
+	 * here had drifted (missing /opt/homebrew, unbounded probe) so this test
+	 * skipped on machines where {@link BinDiffRunnerTest} ran.
+	 */
 	private static String bindiffCmd() {
-		String[] candidates = {
-				System.getProperty("binexport.bindiff"),
-				"bindiff",
-				"/usr/local/bin/bindiff",
-				"/opt/bindiff/bin/bindiff",
-		};
-		for (String cmd : candidates) {
-			if (cmd == null) {
-				continue;
-			}
-			try {
-				// bindiff --help exits non-zero (Google-flags CLI), so detect by
-				// output content rather than exit code.
-				Process p = new ProcessBuilder(cmd, "--help").redirectErrorStream(true).start();
-				String out = new String(p.getInputStream().readAllBytes());
-				p.waitFor();
-				if (out.toLowerCase(java.util.Locale.ROOT).contains("bindiff")) {
-					return cmd;
-				}
-			} catch (Exception ignored) {
-				// try next candidate
-			}
-		}
-		return null;
+		return BinDiffRunner.findBindiff(null, ExportProgress.NONE);
 	}
 
 	private static Path compile(Path tmp) throws IOException {
-		Path srcDir = Files.createDirectories(tmp.resolve("src"));
-		Path classesDir = Files.createDirectories(tmp.resolve("classes"));
-		Path src = srcDir.resolve("Sample.java");
-		Files.write(src, SAMPLE.getBytes());
-		JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
-		assertNotNull(compiler, "JDK (not JRE) required");
-		assertEquals(0, compiler.run(null, null, null, "-d", classesDir.toString(), "-g", src.toString()),
-				"javac failed");
-		return classesDir;
+		return TestCompiler.compile(tmp, "Sample", SAMPLE);
 	}
 }

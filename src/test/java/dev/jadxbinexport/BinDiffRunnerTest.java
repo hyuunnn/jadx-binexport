@@ -14,9 +14,6 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
-import javax.tools.JavaCompiler;
-import javax.tools.ToolProvider;
-
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -110,14 +107,6 @@ class BinDiffRunnerTest {
 	}
 
 	private static Path compile(Path tmp) throws IOException {
-		Path srcDir = Files.createDirectories(tmp.resolve("src"));
-		Path classesDir = Files.createDirectories(tmp.resolve("classes"));
-		Path src = srcDir.resolve("Sample.java");
-		Files.write(src, SAMPLE.getBytes());
-		JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
-		assertNotNull(compiler, "JDK (not JRE) required");
-		assertEquals(0, compiler.run(null, null, null, "-d", classesDir.toString(), "-g", src.toString()),
-				"javac failed");
-		return classesDir;
+		return TestCompiler.compile(tmp, "Sample", SAMPLE);
 	}
 }

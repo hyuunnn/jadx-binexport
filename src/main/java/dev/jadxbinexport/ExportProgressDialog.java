@@ -50,6 +50,12 @@ final class ExportProgressDialog implements ExportProgress {
 	private JProgressBar bar;
 	private JLabel note;
 	private final List<JDialog> warnings = new ArrayList<>();
+	// Live warning dialogs across ALL flows (EDT-confined): close() deliberately
+	// leaves advisories up on success/failure, so a later flow's cascade must
+	// offset past a prior flow's undismissed warning or the two land pixel-exact
+	// on top of each other (identical parent-centered geometry) and the lower
+	// one looks undismissable.
+	private static int liveWarnings = 0;
 	private volatile boolean cancelled;
 
 	ExportProgressDialog(JFrame parent, String title) {
@@ -155,19 +161,26 @@ final class ExportProgressDialog implements ExportProgress {
 			// createDialog only hides on OK; dispose so dismissed warnings don't
 			// accumulate as hidden-but-live windows across a session.
 			pane.addPropertyChangeListener(JOptionPane.VALUE_PROPERTY, ev -> d.dispose());
-			int cascade = warnings.size() * 24; // de-stack multiple undismissed warnings
+			// Cascade past every live warning, including prior flows' (static).
+			int cascade = liveWarnings * 24;
+			liveWarnings++;
 			warnings.add(d); // EDT-confined, like all state here
 			d.addWindowListener(new WindowAdapter() {
 				@Override
 				public void windowClosed(WindowEvent e) {
+					liveWarnings--;
 					warnings.remove(d);
 				}
 			});
 			// Place below the progress dialog from LIVE geometry (both center on
 			// the parent, and a magic pixel offset would silently re-cover the
 			// Cancel button if the dialog were ever resized); build() has run by
-			// now (FIFO EDT posts), so `dialog` is set. Clamp to the screen.
-			int y = dialog.getY() + dialog.getHeight() + 12 + cascade;
+			// now (FIFO EDT posts), so `dialog` is set unless its ctor itself
+			// threw - fall back to a parent-relative offset then, matching the
+			// null guards in stage()/update()/close(). Clamp to the screen.
+			int y = dialog != null
+					? dialog.getY() + dialog.getHeight() + 12 + cascade
+					: d.getY() + 170 + cascade;
 			GraphicsConfiguration gc = parent.getGraphicsConfiguration();
 			if (gc != null) {
 				Rectangle screen = gc.getBounds();
@@ -188,12 +201,17 @@ final class ExportProgressDialog implements ExportProgress {
 	 * hand-rolled copies had already drifted once: the diff action's dialog
 	 * ctor escaped the guarded try, so a ctor throw would have latched its
 	 * guard and killed the menu until restart). Contract: reject re-entry via
-	 * {@code guard} (optionally telling the user via {@code busyMessage});
-	 * build the dialog INSIDE the try that resets the guard; run {@code work}
-	 * on a named worker thread; {@link Exporter.CancelledException} is an info
-	 * log only, any other Throwable is an error log + error dialog; a finally
-	 * always closes the dialog and clears the guard; ctor/start() failures are
-	 * covered by the same outer try. Action-specific behavior (extra catches,
+	 * {@code guard}, telling the user via {@code busyMessage} (a log-only
+	 * rejection is invisible in the GUI - the doctrine this codebase applies
+	 * everywhere else); build the dialog INSIDE the try that resets the guard;
+	 * run {@code work} on a named worker thread; {@link
+	 * Exporter.CancelledException} is an info log only, any other Throwable is
+	 * an error log + error dialog; a finally always closes the dialog (passing
+	 * whether the flow actually ended cancelled, see {@link #close(boolean)})
+	 * and clears the guard; ctor/start() failures are covered by the same
+	 * outer try. NOTE: jadx-gui dispatches menu-action runnables on its
+	 * BACKGROUND executor, not the EDT, so every Swing touch here marshals via
+	 * {@code gui.uiRun}/invokeLater. Action-specific behavior (extra catches,
 	 * temp-file cleanup, success dialogs) lives inside {@code work}.
 	 */
 	static void runGuarded(JadxGuiContext gui, AtomicBoolean guard, String dialogTitle,
@@ -201,10 +219,8 @@ final class ExportProgressDialog implements ExportProgress {
 			GuardedWork work) {
 		if (!guard.compareAndSet(false, true)) {
 			LOG.warn("[BinExport] {} rejected: already running", threadName);
-			if (busyMessage != null) {
-				JOptionPane.showMessageDialog(gui.getMainFrame(), busyMessage,
-						errorTitle, JOptionPane.INFORMATION_MESSAGE);
-			}
+			gui.uiRun(() -> JOptionPane.showMessageDialog(gui.getMainFrame(), busyMessage,
+					errorTitle, JOptionPane.INFORMATION_MESSAGE));
 			return;
 		}
 		ExportProgressDialog progress = null;
@@ -212,23 +228,27 @@ final class ExportProgressDialog implements ExportProgress {
 			progress = new ExportProgressDialog(gui.getMainFrame(), dialogTitle);
 			ExportProgressDialog p = progress;
 			new Thread(() -> {
+				boolean flowCancelled = false;
 				try {
 					work.run(p);
 				} catch (Exporter.CancelledException c) {
+					flowCancelled = true;
 					LOG.info("[BinExport] {} cancelled by user", threadName);
 				} catch (Throwable t) {
-					LOG.error("[BinExport] {} failed", threadName, t);
+					// dialogTitle carries the action context (e.g. which .BinExport
+					// a diff ran against) - the on-screen title is not in the log.
+					LOG.error("[BinExport] {} ({}) failed", threadName, dialogTitle, t);
 					gui.uiRun(() -> JOptionPane.showMessageDialog(gui.getMainFrame(),
 							failPrefix + ":\n" + t.getMessage(),
 							errorTitle, JOptionPane.ERROR_MESSAGE));
 				} finally {
-					p.close();
+					p.close(flowCancelled);
 					guard.set(false);
 				}
 			}, threadName).start();
 		} catch (Throwable t) {
 			if (progress != null) {
-				progress.close();
+				progress.close(false); // no work ran, so no warnings exist yet
 			}
 			guard.set(false);
 			throw t;
@@ -237,19 +257,22 @@ final class ExportProgressDialog implements ExportProgress {
 
 	/**
 	 * Disposes the dialog (any thread). Undismissed warnings are disposed only
-	 * on a CANCELLED flow (they would otherwise orphan - each flow builds a
-	 * fresh dialog, so a later close() can never clean up a prior flow's
-	 * leftovers). On success or failure the advisory stays up until the user
-	 * dismisses it: it is most relevant exactly when the results (or a retry
-	 * decision) are on screen, and auto-disposing it the moment results appear
-	 * would defeat its purpose for a user who stepped away during the run.
+	 * when the flow actually ENDED cancelled - not on the raw Cancel-button
+	 * flag, which can be set after the work's last poll point and would then
+	 * wrongly dispose the advisory alongside successfully shown results. On
+	 * success or failure the advisory stays up until the user dismisses it: it
+	 * is most relevant exactly when the results (or a retry decision) are on
+	 * screen, and auto-disposing it the moment results appear would defeat its
+	 * purpose for a user who stepped away during the run. (On cancel it must
+	 * go: each flow builds a fresh dialog, so a later close() could never
+	 * clean up a prior flow's orphan.)
 	 */
-	void close() {
+	void close(boolean flowCancelled) {
 		SwingUtilities.invokeLater(() -> {
 			if (dialog != null) {
 				dialog.dispose();
 			}
-			if (cancelled) {
+			if (flowCancelled) {
 				// Snapshot: dispose fires windowClosed, which removes from the list.
 				for (JDialog w : new ArrayList<>(warnings)) {
 					w.dispose();

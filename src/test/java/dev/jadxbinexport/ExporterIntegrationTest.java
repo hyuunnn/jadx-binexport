@@ -14,9 +14,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Predicate;
 
-import javax.tools.JavaCompiler;
-import javax.tools.ToolProvider;
-
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -359,15 +356,6 @@ class ExporterIntegrationTest {
 	}
 
 	private static Path compileClass(Path tmp, String className, String source) throws IOException {
-		Path srcDir = Files.createDirectories(tmp.resolve("src"));
-		Path classesDir = Files.createDirectories(tmp.resolve("classes"));
-		Path src = srcDir.resolve(className + ".java");
-		Files.write(src, source.getBytes());
-
-		JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
-		assertNotNull(compiler, "JDK (not JRE) required to run this test");
-		int rc = compiler.run(null, null, null, "-d", classesDir.toString(), "-g", src.toString());
-		assertTrue(rc == 0, "javac failed rc=" + rc);
-		return classesDir;
+		return TestCompiler.compile(tmp, className, source);
 	}
 }
