@@ -108,6 +108,12 @@ public final class Exporter {
 	// wrapped invokes included, self-recursion kept).
 	private final List<Set<Integer>> calleesByMethod = new ArrayList<>();
 
+	// Per-instruction scratch buffers, reused across the ~100k-300k instructions
+	// of a real app (single-threaded emission) so the hot loop doesn't allocate a
+	// throwaway set + StringBuilder per instruction. Cleared before each use.
+	private final Set<Integer> insnCallees = new LinkedHashSet<>();
+	private final StringBuilder renderBuf = new StringBuilder(64);
+
 	// jadx interns MethodInfo, so callee resolution and callee symbol operands
 	// are cached by identity - getRawFullId() rebuilds its string per call, and
 	// external (framework) callees would otherwise rebuild it on every invoke.
@@ -534,9 +540,10 @@ public final class Exporter {
 			// invokes into operand trees (InsnWrapArg) and those calls belong to
 			// this instruction too. Self-recursion is kept - reference BinExport
 			// builders emit it and BinDiff's degree-based matching expects it.
-			Set<Integer> callees = new LinkedHashSet<>();
-			collectCallees(insn, callees);
-			for (int ci : callees) {
+			// insnCallees dedups within one instruction and is reused across insns.
+			insnCallees.clear();
+			collectCallees(insn, insnCallees);
+			for (int ci : insnCallees) {
 				ib.addCallTarget(methodAddress(ci));
 				methodCallees.add(ci);
 			}
@@ -600,9 +607,9 @@ public final class Exporter {
 	}
 
 	private ByteString renderBytes(InsnNode insn) {
-		StringBuilder sb = new StringBuilder(32);
-		renderInsn(insn, sb);
-		return ByteString.copyFromUtf8(sb.toString());
+		renderBuf.setLength(0); // reused across instructions; single-threaded emission
+		renderInsn(insn, renderBuf);
+		return ByteString.copyFromUtf8(renderBuf.toString());
 	}
 
 	/**
