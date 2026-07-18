@@ -130,24 +130,15 @@ public final class BinDiffResults {
 			if ((i & 255) == 0 && prog.cancelled()) {
 				throw new Exporter.CancelledException();
 			}
-			indexClass(classes.get(i), visited, index);
+			// Shared walk (see Exporter.walkClassTree): guarantees this index
+			// enumerates methods exactly like the exporter, so keys line up.
+			Exporter.walkClassTree(classes.get(i), visited, cls -> {
+				for (MethodNode mth : cls.getMethods()) {
+					index.putIfAbsent(mth.getMethodInfo().getRawFullId(), mth);
+				}
+			});
 		}
 		return index;
-	}
-
-	private static void indexClass(ClassNode cls, Set<ClassNode> visited, Map<String, MethodNode> index) {
-		if (cls == null || !visited.add(cls)) {
-			return;
-		}
-		for (MethodNode mth : cls.getMethods()) {
-			index.putIfAbsent(mth.getMethodInfo().getRawFullId(), mth);
-		}
-		for (ClassNode inner : cls.getInnerClasses()) {
-			indexClass(inner, visited, index);
-		}
-		for (ClassNode inlined : cls.getInlinedClasses()) {
-			indexClass(inlined, visited, index);
-		}
 	}
 
 	/**

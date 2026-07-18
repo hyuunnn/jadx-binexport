@@ -104,7 +104,7 @@ class BinDiffRunnerTest {
 		args.setOutDir(jadxOut.toFile());
 		try (JadxDecompiler jadx = new JadxDecompiler(args)) {
 			jadx.load();
-			Exporter.runToFile(jadx, outFile);
+			Exporter.runToFile(jadx, outFile, ExportProgress.NONE, null);
 		}
 		assertTrue(outFile.isFile(), "other .BinExport not produced");
 	}

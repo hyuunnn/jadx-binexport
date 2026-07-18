@@ -1,6 +1,7 @@
 package dev.jadxbinexport;
 
 import java.awt.BorderLayout;
+import java.awt.Dialog;
 import java.awt.Dimension;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
@@ -10,6 +11,7 @@ import javax.swing.JButton;
 import javax.swing.JDialog;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
+import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JProgressBar;
 import javax.swing.SwingUtilities;
@@ -115,6 +117,28 @@ final class ExportProgressDialog implements ExportProgress {
 	@Override
 	public boolean cancelled() {
 		return cancelled;
+	}
+
+	/**
+	 * Surfaces an advisory as a MODELESS warning dialog parented to the main
+	 * frame. Modeless is load-bearing: a modal JOptionPane would block input to
+	 * this (modeless) progress dialog, making its Cancel button unreachable
+	 * while e.g. a long bindiff run proceeds behind the warning. Implemented
+	 * here (not per-caller) so every flow that uses this dialog surfaces warns
+	 * - the interface contract says a log-only warning is invisible in the GUI.
+	 */
+	@Override
+	public void warn(String message) {
+		SwingUtilities.invokeLater(() -> {
+			JOptionPane pane = new JOptionPane(message, JOptionPane.WARNING_MESSAGE);
+			JDialog d = pane.createDialog(parent, title);
+			d.setModalityType(Dialog.ModalityType.MODELESS);
+			d.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
+			// createDialog only hides on OK; dispose so dismissed warnings don't
+			// accumulate as hidden-but-live windows across a session.
+			pane.addPropertyChangeListener(JOptionPane.VALUE_PROPERTY, ev -> d.dispose());
+			d.setVisible(true); // modeless: returns immediately
+		});
 	}
 
 	/** Disposes the dialog (safe to call from any thread). */

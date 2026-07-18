@@ -172,7 +172,7 @@ class ExporterIntegrationTest {
 				}
 			};
 			Path recorded = tmp.resolve("recorded.BinExport");
-			Exporter.runToFile(jadx, recorded.toFile(), recorder);
+			Exporter.runToFile(jadx, recorded.toFile(), recorder, null);
 			assertTrue(Files.isRegularFile(recorded), "export should complete");
 			assertTrue(stages.stream().anyMatch(s -> s.contains("Decompiling")),
 					"expected a class-decompilation stage, got: " + stages);
@@ -201,7 +201,7 @@ class ExporterIntegrationTest {
 				}
 			};
 			assertThrows(Exporter.CancelledException.class,
-					() -> Exporter.runToFile(jadx, cancelled.toFile(), cancelAtWrite));
+					() -> Exporter.runToFile(jadx, cancelled.toFile(), cancelAtWrite, null));
 			assertTrue(sawWriteStage[0], "export should have reached the Writing stage before cancel");
 			assertFalse(Files.exists(cancelled), "a late-cancelled export must not write a file");
 		} finally {
@@ -268,7 +268,7 @@ class ExporterIntegrationTest {
 
 			// Default OFF: no IMPORTED vertices at all.
 			Path off = tmp.resolve("off.BinExport");
-			Exporter.runToFile(jadx, off.toFile());
+			Exporter.runToFile(jadx, off.toFile(), ExportProgress.NONE, null);
 			BinExport2 beOff = parse(off);
 			assertTrue(beOff.getCallGraph().getVertexList().stream()
 					.noneMatch(v -> v.getType() == BinExport2.CallGraph.Vertex.Type.IMPORTED),
@@ -311,9 +311,16 @@ class ExporterIntegrationTest {
 			System.out.println("[imports] off=" + beOff.getCallGraph().getVertexCount()
 					+ " vertices, on=" + vs.size() + " (with IMPORTED); edges target imports");
 		}
+	}
 
-		// Tri-state option semantics: an explicit =false must override the legacy
-		// sysprop (a fallback, not an override); unset still falls back to it.
+	/**
+	 * Tri-state option semantics: an explicit {@code =false} must override the
+	 * legacy sysprop (a fallback, not an override); unset still falls back to
+	 * it. Pure {@link BinExportOptions} unit test - no decompiler involved, so
+	 * a boolWithProp regression fails HERE, not buried behind an e2e failure.
+	 */
+	@Test
+	void triStateBoolBeatsLegacySysprop() {
 		System.setProperty("binexport.imports", "true");
 		try {
 			BinExportOptions explicitOff = new BinExportOptions();

@@ -1,5 +1,7 @@
 package dev.jadxbinexport;
 
+import java.util.function.Function;
+
 import jadx.api.plugins.options.impl.BasePluginOptionsBuilder;
 
 /**
@@ -51,12 +53,29 @@ public class BinExportOptions extends BasePluginOptionsBuilder {
 				.setter(v -> bindiff = v);
 		boolOption(BinExportPlugin.PLUGIN_ID + ".strict")
 				.description("fail the run (non-zero exit) if the export fails, for CI")
-				.formatter(v -> v == null ? "false" : v.toString())
+				.formatter(boolFormatter("binexport.strict"))
 				.setter(v -> strict = v);
 		boolOption(BinExportPlugin.PLUGIN_ID + ".imports")
 				.description("also emit IMPORTED vertices/edges for external calls (richer diff, larger output)")
-				.formatter(v -> v == null ? "false" : v.toString())
+				.formatter(boolFormatter("binexport.imports"))
 				.setter(v -> imports = v);
+	}
+
+	/**
+	 * Formatter for a tri-state boolean option. For null (= unset) it reports
+	 * the EFFECTIVE default - what {@link #boolWithProp} will resolve via the
+	 * legacy sysprop - so the GUI checkbox and {@code jadx plugins} listing
+	 * agree with actual behavior when e.g. JADX_OPTS sets the sysprop true
+	 * (defaultValue() re-applies the formatter on every display, so this stays
+	 * current). Also load-bearing for null itself: jadx's stock bool formatter
+	 * would NPE on our absent defaultValue. Note the GUI persists a value only
+	 * once the user touches the option; a touched-then-restored checkbox stores
+	 * an explicit value that beats the sysprop from then on - intended tri-state
+	 * semantics, with no way to un-set from the GUI.
+	 */
+	private static Function<Boolean, String> boolFormatter(String prop) {
+		return v -> v != null ? v.toString()
+				: String.valueOf(Boolean.parseBoolean(System.getProperty(prop)));
 	}
 
 	public String getOutput() {

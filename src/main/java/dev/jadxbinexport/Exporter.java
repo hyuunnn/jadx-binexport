@@ -21,6 +21,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -173,29 +174,15 @@ public final class Exporter {
 	}
 
 	/**
-	 * Exports to an explicit file, bypassing option/sysprop path resolution.
-	 *
-	 * <p>WARNING: registered plugin options are NOT consulted either - a fresh
-	 * options instance resolves content options (e.g. {@code imports}) from the
-	 * legacy system properties only. Production callers should pass the
-	 * registered options via
-	 * {@link #runToFile(JadxDecompiler, File, ExportProgress, BinExportOptions)}
-	 * (the trap this note exists to prevent: the in-GUI diff once used this
-	 * overload and silently ignored the user's {@code jadx-binexport.imports}).
-	 */
-	public static File runToFile(JadxDecompiler decompiler, File out) {
-		return runToFile(decompiler, out, ExportProgress.NONE);
-	}
-
-	/** See {@link #runToFile(JadxDecompiler, File)} for the null-options caveat. */
-	public static File runToFile(JadxDecompiler decompiler, File out, ExportProgress progress) {
-		return runToFile(decompiler, out, progress, null);
-	}
-
-	/**
-	 * Exports to an explicit file (path options bypassed) but honoring content
-	 * options like {@code imports} - so the in-GUI diff's current-app export
-	 * respects the same {@code jadx-binexport.imports} setting as a plain export.
+	 * Exports to an explicit file: path options/sysprops are bypassed, content
+	 * options like {@code imports} are honored - so the in-GUI diff's current-app
+	 * export respects the same {@code jadx-binexport.imports} setting as a plain
+	 * export. There is deliberately no shorter overload: passing {@code null}
+	 * options substitutes a fresh instance that resolves content options from
+	 * the LEGACY SYSTEM PROPERTIES ONLY (registered plugin options are not
+	 * consulted), so that choice must be visible at the call site - the in-GUI
+	 * diff once used an implicit-null overload and silently ignored the user's
+	 * {@code jadx-binexport.imports}.
 	 */
 	public static File runToFile(JadxDecompiler decompiler, File out, ExportProgress progress,
 			BinExportOptions options) {
@@ -243,8 +230,9 @@ public final class Exporter {
 	}
 
 	/**
-	 * Per-iteration cancel poll + throttled progress update for the two big
-	 * loops. {@code done} is 0-based; the bar is advanced to {@code done + 1} and
+	 * Per-iteration cancel poll + throttled progress update for the ticked
+	 * per-item loops (class collection, body emission, call-graph vertices).
+	 * {@code done} is 0-based; the bar is advanced to {@code done + 1} and
 	 * always flushed on the final item so it visibly reaches the total.
 	 */
 	private void tick(int done, int total, int mask) {
@@ -349,26 +337,38 @@ public final class Exporter {
 	}
 
 	private void collect(ClassNode cls, Set<ClassNode> visited) {
+		walkClassTree(cls, visited, c -> {
+			try {
+				// Run the decompile passes (block splitting, SSA, dominators, region
+				// making) WITHOUT code generation. Plain cls.decompile() would unload
+				// the class right after codegen, discarding the basic blocks we need.
+				c.root().getProcessClasses().forceProcess(c);
+			} catch (Throwable t) {
+				ClassNode top = c.getTopParentClass();
+				if (processFailed.add(top)) {
+					LOG.warn("[BinExport] process failed for {}; exporting its methods without bodies", top, t);
+				}
+			}
+			methods.addAll(c.getMethods());
+		});
+	}
+
+	/**
+	 * THE class-tree traversal (identity visited-set, inner + inlined recursion).
+	 * {@link BinDiffResults#methodIndex} must enumerate methods EXACTLY like the
+	 * exporter or match names silently stop resolving - sharing this walk turns
+	 * that documented invariant into code instead of parallel implementations.
+	 */
+	static void walkClassTree(ClassNode cls, Set<ClassNode> visited, Consumer<ClassNode> action) {
 		if (cls == null || !visited.add(cls)) {
 			return;
 		}
-		try {
-			// Run the decompile passes (block splitting, SSA, dominators, region
-			// making) WITHOUT code generation. Plain cls.decompile() would unload
-			// the class right after codegen, discarding the basic blocks we need.
-			cls.root().getProcessClasses().forceProcess(cls);
-		} catch (Throwable t) {
-			ClassNode top = cls.getTopParentClass();
-			if (processFailed.add(top)) {
-				LOG.warn("[BinExport] process failed for {}; exporting its methods without bodies", top, t);
-			}
-		}
-		methods.addAll(cls.getMethods());
+		action.accept(cls);
 		for (ClassNode inner : cls.getInnerClasses()) {
-			collect(inner, visited);
+			walkClassTree(inner, visited, action);
 		}
 		for (ClassNode inlined : cls.getInlinedClasses()) {
-			collect(inlined, visited);
+			walkClassTree(inlined, visited, action);
 		}
 	}
 

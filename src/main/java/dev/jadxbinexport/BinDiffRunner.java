@@ -1,5 +1,6 @@
 package dev.jadxbinexport;
 
+import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -13,6 +14,9 @@ import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.google.protobuf.CodedInputStream;
+import com.google.protobuf.ExtensionRegistryLite;
+import com.google.protobuf.WireFormat;
 import com.google.security.zynamics.BinExport.BinExport2;
 
 import jadx.api.JadxDecompiler;
@@ -73,12 +77,20 @@ final class BinDiffRunner {
 
 		Path work = Files.createTempDirectory("jadx-binexport");
 		try {
+			// Advisory compatibility check FIRST: it needs only the other file and
+			// the options, and its whole point is to warn BEFORE minutes of export
+			// are spent on a mismatched configuration. Cheap now (streamed
+			// call-graph-only read), but still poll cancel around it.
+			progress.stage("Checking compatibility…", 0);
+			warnOnImportsMismatch(otherBinExport, options, progress);
+			if (progress.cancelled()) {
+				throw new Exporter.CancelledException();
+			}
+
 			File current = new File(work.toFile(), "current.BinExport");
 			// Pass options so the current-app export honors content settings like
 			// jadx-binexport.imports (the explicit path still bypasses path options).
 			Exporter.runToFile(decompiler, current, progress, options);
-
-			warnOnImportsMismatch(otherBinExport, options, progress);
 
 			// bindiff has no progress protocol, so show it as an indeterminate stage;
 			// runProcess polls progress.cancelled() so Cancel kills a running bindiff.
@@ -114,18 +126,21 @@ final class BinDiffRunner {
 	 * {@code jadx-binexport.imports} setting: IMPORTED vertices/edges change the
 	 * call-graph topology BinDiff matches on, so an on/off mismatch silently
 	 * degrades results (the same both-sides-must-match rule as the jadx and
-	 * plugin versions). The current side's setting is known from the options;
-	 * the other side is a finished file whose IMPORTED vertices are directly
-	 * visible - on disagreement, warn (log + progress sink) but still run the
-	 * diff, since the output is valid, just weaker.
+	 * plugin versions). The comparison is content-based (does the other file
+	 * carry IMPORTED vertices?) because topology is what matching consumes; the
+	 * meta {@code +imports} marker is display-oriented and absent from files
+	 * made by plugin builds predating it. On disagreement, warn (log + progress
+	 * sink) but still run the diff - the output is valid, just weaker. Advisory
+	 * only: ANY failure here (parse error, even OOM on a corrupt file) is
+	 * swallowed, it must never abort the diff itself.
 	 */
 	private static void warnOnImportsMismatch(File other, BinExportOptions options,
 			ExportProgress progress) {
-		boolean currentImports = options != null && options.isImports();
-		try (InputStream in = Files.newInputStream(other.toPath())) {
-			boolean otherImports = BinExport2.parseFrom(in)
-					.getCallGraph().getVertexList().stream()
-					.anyMatch(v -> v.getType() == BinExport2.CallGraph.Vertex.Type.IMPORTED);
+		// Mirror Exporter's null handling (fresh instance = legacy-sysprop
+		// fallback) so the check judges the SAME setting the export will use.
+		boolean currentImports = (options != null ? options : new BinExportOptions()).isImports();
+		try {
+			boolean otherImports = hasImportedVertices(other);
 			if (currentImports != otherImports) {
 				String msg = "The two exports disagree on 'jadx-binexport.imports'"
 						+ " (current app: " + (currentImports ? "on" : "off")
@@ -136,11 +151,36 @@ final class BinDiffRunner {
 				LOG.warn("[BinExport] {}", msg.replace('\n', ' '));
 				progress.warn(msg);
 			}
-		} catch (IOException | RuntimeException e) {
+		} catch (Throwable e) {
 			// Best-effort: an unreadable/corrupt file will fail loudly in bindiff
 			// itself with a better message; don't block the diff on the check.
 			LOG.debug("[BinExport] imports-mismatch check skipped: {}", e.toString());
 		}
+	}
+
+	/**
+	 * Streams only the top-level {@code call_graph} field out of a .BinExport
+	 * and scans its vertices for IMPORTED. A full {@code BinExport2.parseFrom}
+	 * would materialize the instruction/basic-block bulk of a multi-MB file
+	 * (hundreds of MB of message objects) inside the jadx JVM just to answer a
+	 * boolean; skipping to the call graph reads the same bytes but allocates
+	 * only the comparatively small vertex/edge lists.
+	 */
+	private static boolean hasImportedVertices(File f) throws IOException {
+		try (InputStream in = new BufferedInputStream(Files.newInputStream(f.toPath()))) {
+			CodedInputStream cis = CodedInputStream.newInstance(in);
+			int tag;
+			while ((tag = cis.readTag()) != 0) {
+				if (WireFormat.getTagFieldNumber(tag) == BinExport2.CALL_GRAPH_FIELD_NUMBER) {
+					BinExport2.CallGraph.Builder cg = BinExport2.CallGraph.newBuilder();
+					cis.readMessage(cg, ExtensionRegistryLite.getEmptyRegistry());
+					return cg.getVertexList().stream()
+							.anyMatch(v -> v.getType() == BinExport2.CallGraph.Vertex.Type.IMPORTED);
+				}
+				cis.skipField(tag);
+			}
+		}
+		return false;
 	}
 
 	/**
