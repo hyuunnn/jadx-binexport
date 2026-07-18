@@ -156,17 +156,13 @@ public final class Exporter {
 	}
 
 	/**
-	 * Entry point: build and write the .BinExport file, returning its path.
-	 * As with {@link #runToFile}, there is deliberately no no-options overload:
+	 * Entry point: build and write the .BinExport file, returning its path,
+	 * with progress reporting / cancellation (see {@link ExportProgress}).
+	 * As with {@link #runToFile}, there are deliberately no shorter overloads:
 	 * {@code null} options mean legacy-sysprop-only resolution (registered
-	 * plugin options are NOT consulted), and that choice must be visible at the
-	 * call site.
+	 * plugin options are NOT consulted) and {@code null} progress means no
+	 * reporting - both choices must be visible at the call site.
 	 */
-	public static File run(JadxDecompiler decompiler, BinExportOptions options) {
-		return run(decompiler, options, ExportProgress.NONE);
-	}
-
-	/** Exports with progress reporting / cancellation (see {@link ExportProgress}). */
 	public static File run(JadxDecompiler decompiler, BinExportOptions options, ExportProgress progress) {
 		Exporter e = new Exporter(options);
 		e.progress = ExportProgress.orNone(progress);
@@ -213,11 +209,6 @@ public final class Exporter {
 		}
 	}
 
-	/** Throws if the user asked to cancel; called at each phase boundary. */
-	private void checkCancelled() {
-		progress.throwIfCancelled();
-	}
-
 	/** Cancel poll throttled to every 256th item, for the light per-item loops. */
 	private void checkCancelledEvery(int i) {
 		progress.throwIfCancelledEvery(i, 255);
@@ -230,7 +221,7 @@ public final class Exporter {
 	 * always flushed on the final item so it visibly reaches the total.
 	 */
 	private void tick(int done, int total, int mask) {
-		checkCancelled();
+		progress.throwIfCancelled();
 		if ((done & mask) == 0 || done == total - 1) {
 			progress.update(done + 1, total);
 		}
@@ -243,12 +234,15 @@ public final class Exporter {
 	 */
 	public static void runLogged(JadxDecompiler decompiler, BinExportOptions options) {
 		try {
-			run(decompiler, options);
+			run(decompiler, options, ExportProgress.NONE);
 		} catch (CancelledException c) {
 			LOG.info("[BinExport] export cancelled");
 		} catch (Throwable t) {
 			LOG.error("[BinExport] export failed", t);
-			if (options != null && options.isStrict()) {
+			// orDefault, not a null check: null options must still honor the
+			// legacy -Dbinexport.strict sysprop (the documented CI/library path),
+			// otherwise a failed strict export silently exits 0.
+			if (BinExportOptions.orDefault(options).isStrict()) {
 				throw t instanceof RuntimeException ? (RuntimeException) t : new RuntimeException(t);
 			}
 		}
@@ -286,14 +280,14 @@ public final class Exporter {
 		}
 		methods.clear();
 		methods.addAll(deduped);
-		checkCancelled();
+		progress.throwIfCancelled();
 		resolveBodies();
 
 		// 3. Global tables and graphs (order matters for index bookkeeping). Cancel
 		// is polled at each phase boundary (and per-item inside the big loops) so a
 		// late cancel still aborts BEFORE the file is written - the whole point of
 		// the Cancel button is that a cancelled export leaves nothing behind.
-		checkCancelled();
+		progress.throwIfCancelled();
 		buildMnemonics();
 		buildBodies();
 		buildCallGraph();
@@ -302,7 +296,7 @@ public final class Exporter {
 		// 4. Serialize. Last cancel gate is right before the write, so a cancel any
 		// time before this leaves no file on disk.
 		progress.stage("Writing file", 0);
-		checkCancelled();
+		progress.throwIfCancelled();
 		File out = explicitOutput != null ? explicitOutput : resolveOutputFile(decompiler.getArgs());
 		File parent = out.getParentFile();
 		if (parent != null) {

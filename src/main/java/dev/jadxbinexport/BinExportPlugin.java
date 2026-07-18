@@ -5,9 +5,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.swing.JOptionPane;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import jadx.api.plugins.JadxPlugin;
 import jadx.api.plugins.JadxPluginContext;
 import jadx.api.plugins.JadxPluginInfo;
@@ -38,8 +35,6 @@ import jadx.api.plugins.pass.impl.SimpleAfterLoadPass;
  */
 public class BinExportPlugin implements JadxPlugin {
 
-	private static final Logger LOG = LoggerFactory.getLogger(BinExportPlugin.class);
-
 	public static final String PLUGIN_ID = "jadx-binexport";
 
 	@Override
@@ -58,50 +53,21 @@ public class BinExportPlugin implements JadxPlugin {
 		if (gui != null) {
 			// Fetch the decompiler at click time (the instance seen at init() can
 			// be stale after a project reload) and refuse concurrent runs - two
-			// exports would race on the same output file.
+			// exports would race on the same output file. Guard/dialog/worker
+			// lifecycle lives in ExportProgressDialog.runGuarded, shared with the
+			// diff action so the two can never drift apart again.
 			AtomicBoolean running = new AtomicBoolean();
-			gui.addMenuAction("Export to BinExport (.BinExport)", () -> {
-				if (!running.compareAndSet(false, true)) {
-					LOG.warn("[BinExport] export already in progress");
-					return;
-				}
-				// A big app takes minutes; show a progress bar with a Cancel button.
-				// Everything that can throw before the worker's finally runs is inside
-				// this try so `running` is always reset (else the menu is dead until
-				// restart) and any built dialog is closed.
-				ExportProgressDialog progress = null;
-				try {
-					progress = new ExportProgressDialog(gui.getMainFrame(), "Exporting to BinExport…");
-					ExportProgressDialog p = progress;
-					new Thread(() -> {
-						try {
-							// Report where it went / why it failed: the GUI has no out
-							// dir configured, so the resolved path is not obvious and a
-							// log-only failure would be invisible without the Log Viewer.
-							File out = Exporter.run(context.getDecompiler(), options, p);
-							gui.uiRun(() -> JOptionPane.showMessageDialog(gui.getMainFrame(),
-									"Exported to:\n" + out.getAbsolutePath(),
-									"BinExport", JOptionPane.INFORMATION_MESSAGE));
-						} catch (Exporter.CancelledException c) {
-							LOG.info("[BinExport] export cancelled by user");
-						} catch (Throwable t) {
-							LOG.error("[BinExport] export failed", t);
-							gui.uiRun(() -> JOptionPane.showMessageDialog(gui.getMainFrame(),
-									"Export failed:\n" + t.getMessage(),
-									"BinExport", JOptionPane.ERROR_MESSAGE));
-						} finally {
-							p.close();
-							running.set(false);
-						}
-					}, "binexport-export").start();
-				} catch (Throwable t) {
-					if (progress != null) {
-						progress.close();
-					}
-					running.set(false);
-					throw t;
-				}
-			});
+			gui.addMenuAction("Export to BinExport (.BinExport)", () ->
+					ExportProgressDialog.runGuarded(gui, running, "Exporting to BinExport…",
+							"BinExport", "Export failed", null, "binexport-export", p -> {
+								// Report where it went: the GUI has no out dir configured,
+								// so the resolved path is not obvious and a log-only result
+								// would be invisible without the Log Viewer.
+								File out = Exporter.run(context.getDecompiler(), options, p);
+								gui.uiRun(() -> JOptionPane.showMessageDialog(gui.getMainFrame(),
+										"Exported to:\n" + out.getAbsolutePath(),
+										"BinExport", JOptionPane.INFORMATION_MESSAGE));
+							}));
 			// Open another app's .BinExport and diff the currently-open app
 			// against it (export + bindiff + browse) in one step, like the IDA
 			// BinDiff plugin loading a second database.

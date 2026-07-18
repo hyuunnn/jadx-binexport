@@ -41,7 +41,7 @@ class BinDiffRunnerTest {
 
 	@Test
 	void diffsCurrentAppAgainstAnotherBinExport(@TempDir Path tmp) throws Exception {
-		assumeTrue(BinDiffRunner.findBindiff(null) != null, "bindiff not found");
+		assumeTrue(BinDiffRunner.findBindiff(null, ExportProgress.NONE) != null, "bindiff not found");
 
 		Path classes = compile(tmp);
 

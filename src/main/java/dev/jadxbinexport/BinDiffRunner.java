@@ -72,7 +72,12 @@ final class BinDiffRunner {
 	static File diff(JadxDecompiler decompiler, File otherBinExport, BinExportOptions options,
 			ExportProgress progressArg) throws Exception {
 		ExportProgress progress = ExportProgress.orNone(progressArg);
-		String bindiff = resolveBindiff(options);
+		// Discovery probes can wedge (--help against a slow/hung candidate, 20s
+		// timeout each) - give them a stage and the cancel-killing sink instead
+		// of a dead Cancel button under the dialog's initial label.
+		progress.stage("Locating bindiff…", 0);
+		String bindiff = resolveBindiff(options, progress);
+		progress.throwIfCancelled();
 
 		Path work = Files.createTempDirectory("jadx-binexport");
 		try {
@@ -156,10 +161,15 @@ final class BinDiffRunner {
 					+ "Re-export one side so both use the same setting.";
 			LOG.warn("[BinExport] {}", msg.replace('\n', ' '));
 			try {
-				// Guarded separately from the parse so a throwing sink is reported
-				// as failed DELIVERY, not a skipped check - and never kills the diff.
+				// Guarded separately from the parse so a SYNCHRONOUS sink failure is
+				// reported as failed DELIVERY, not a skipped check - and, like the
+				// parse guard, never kills the diff (Errors included). A sink that
+				// surfaces asynchronously (ExportProgressDialog posts to the EDT)
+				// owns its own delivery failures - they cannot reach this catch.
 				progress.warn(msg);
-			} catch (RuntimeException e) {
+			} catch (Exporter.CancelledException c) {
+				throw c; // a cancel-polling sink signalling cancel is a real cancel
+			} catch (Throwable e) {
 				LOG.warn("[BinExport] could not deliver the mismatch warning to the progress sink", e);
 			}
 		}
@@ -254,16 +264,20 @@ final class BinDiffRunner {
 	 * with a message naming it rather than silently falling back to a different
 	 * bindiff on PATH. Otherwise auto-detect via PATH and common install paths.
 	 */
-	private static String resolveBindiff(BinExportOptions options) throws BinDiffNotFound {
-		String explicit = options != null ? options.getBindiff() : null;
+	private static String resolveBindiff(BinExportOptions options, ExportProgress progress)
+			throws BinDiffNotFound {
+		// orDefault, not a null check: null options must still honor the legacy
+		// -Dbinexport.bindiff sysprop (getBindiff() folds it in for non-null
+		// options already, so this only aligns the null path with that behavior).
+		String explicit = BinExportOptions.orDefault(options).getBindiff();
 		if (explicit != null && !explicit.isEmpty()) {
-			if (!probe(explicit)) {
+			if (!probe(explicit, progress)) {
 				throw new BinDiffNotFound("configured 'jadx-binexport.bindiff' = '" + explicit
 						+ "' did not run as bindiff. Fix the option or clear it to auto-detect.");
 			}
 			return explicit;
 		}
-		String found = findBindiff(options);
+		String found = findBindiff(options, progress);
 		if (found == null) {
 			throw new BinDiffNotFound(
 					"bindiff executable not found. Install BinDiff, or set the\n"
@@ -283,9 +297,9 @@ final class BinDiffRunner {
 	 * handled authoritatively upstream), so the option candidate below matters
 	 * only for direct callers/tests that pass one.
 	 */
-	static String findBindiff(BinExportOptions options) {
+	static String findBindiff(BinExportOptions options, ExportProgress progress) {
 		String[] candidates = {
-				options != null ? options.getBindiff() : null,
+				BinExportOptions.orDefault(options).getBindiff(),
 				"bindiff",
 				"/opt/homebrew/bin/bindiff", // Apple-Silicon Homebrew default
 				"/usr/local/bin/bindiff", // Intel Homebrew / manual installs
@@ -293,20 +307,26 @@ final class BinDiffRunner {
 				"C:\\Program Files\\BinDiff\\bin\\bindiff.exe",
 		};
 		for (String cmd : candidates) {
-			if (cmd != null && !cmd.isEmpty() && probe(cmd)) {
+			if (cmd != null && !cmd.isEmpty() && probe(cmd, progress)) {
 				return cmd;
 			}
 		}
 		return null;
 	}
 
-	/** True if {@code cmd --help} runs and self-identifies as bindiff. */
-	private static boolean probe(String cmd) {
+	/**
+	 * True if {@code cmd --help} runs and self-identifies as bindiff. Takes the
+	 * progress sink so a Cancel kills a wedged probe (runProcess polls it)
+	 * instead of waiting out the 20s timeout per candidate.
+	 */
+	private static boolean probe(String cmd, ExportProgress progress) {
 		try {
 			// bindiff --help exits non-zero (Google-flags CLI), so detect by output
 			// content rather than exit code.
-			ProcResult res = runProcess(PROBE_TIMEOUT_SEC, ExportProgress.NONE, cmd, "--help");
+			ProcResult res = runProcess(PROBE_TIMEOUT_SEC, progress, cmd, "--help");
 			return res.output.toLowerCase(Locale.ROOT).contains("bindiff");
+		} catch (Exporter.CancelledException c) {
+			throw c; // a user cancel must abort discovery, not read as "not bindiff"
 		} catch (Exception ignored) {
 			return false;
 		}

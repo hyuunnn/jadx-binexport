@@ -37,7 +37,6 @@ import javax.swing.table.TableRowSorter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import jadx.api.JadxDecompiler;
 import jadx.api.plugins.JadxPluginContext;
 import jadx.api.plugins.gui.JadxGuiContext;
 import jadx.core.dex.nodes.MethodNode;
@@ -76,63 +75,40 @@ final class BinDiffResultsPanel {
 			return;
 		}
 		File other = chooser.getSelectedFile();
-		// One diff at a time: like the Export action's guard, reject a second click
-		// while one runs (each would spawn its own bindiff + dialog + result window).
-		if (!DIFF_RUNNING.compareAndSet(false, true)) {
-			LOG.warn("[BinExport] a diff is already in progress");
-			JOptionPane.showMessageDialog(gui.getMainFrame(),
-					"A diff is already running; wait for it to finish or cancel it.",
-					"BinDiff", JOptionPane.INFORMATION_MESSAGE);
-			return;
-		}
 		// One worker runs export -> bindiff -> read-results -> show, driving a
-		// single progress dialog (with Cancel) across the whole flow. A finally
-		// closes the dialog, drops the temp .BinDiff, and clears the guard on every
-		// path; the start() is guarded so a failure to spawn the thread can't leave
-		// the dialog stuck on screen or the guard latched.
-		// The dialog handles progress/cancel AND surfaces advisory warnings (e.g.
-		// an imports-setting mismatch) as a modeless dialog - see
-		// ExportProgressDialog.warn; a log-only warning is invisible in the GUI.
-		ExportProgressDialog progress =
-				new ExportProgressDialog(gui.getMainFrame(), "Diff against " + other.getName());
-		Thread worker = new Thread(() -> {
-			File binDiff = null;
-			try {
-				binDiff = BinDiffRunner.diff(context.getDecompiler(), other, options, progress);
-				String name = binDiff.getName();
-				progress.stage("Loading results…", 0);
-				progress.throwIfCancelled();
-				// Pass the sink so the (slow, on a big app) reads/class-walk poll cancel.
-				List<BinDiffResults.Match> matches = BinDiffResults.loadMatches(binDiff, progress);
-				BinDiffResults.Header header = BinDiffResults.loadHeader(binDiff);
-				Map<String, MethodNode> index = BinDiffResults.methodIndex(context.getDecompiler(), progress);
-				gui.uiRun(() -> show(gui, name, matches, header, index));
-			} catch (BinDiffRunner.BinDiffNotFound nf) {
-				gui.uiRun(() -> JOptionPane.showMessageDialog(gui.getMainFrame(),
-						nf.getMessage(), "BinDiff not found", JOptionPane.WARNING_MESSAGE));
-			} catch (Exporter.CancelledException c) {
-				LOG.info("[BinExport] diff cancelled by user");
-			} catch (Throwable t) {
-				LOG.error("[BinExport] diff against {} failed", other, t);
-				gui.uiRun(() -> JOptionPane.showMessageDialog(gui.getMainFrame(),
-						"Diff failed:\n" + t.getMessage(), "BinDiff", JOptionPane.ERROR_MESSAGE));
-			} finally {
-				progress.close();
-				// The .BinDiff is fully read by now (show() only needs its name), so
-				// drop it eagerly instead of leaving it for JVM-exit deleteOnExit.
-				if (binDiff != null) {
-					binDiff.delete();
-				}
-				DIFF_RUNNING.set(false);
-			}
-		}, "binexport-diff");
-		try {
-			worker.start();
-		} catch (Throwable t) {
-			progress.close();
-			DIFF_RUNNING.set(false);
-			throw t;
-		}
+		// single progress dialog (with Cancel) that also surfaces advisory
+		// warnings (imports-setting mismatch) modelessly. The one-at-a-time
+		// guard, dialog, worker thread and cancel/error/finally handling live in
+		// ExportProgressDialog.runGuarded, shared with the Export action.
+		ExportProgressDialog.runGuarded(gui, DIFF_RUNNING,
+				"Diff against " + other.getName(), "BinDiff", "Diff failed",
+				"A diff is already running; wait for it to finish or cancel it.",
+				"binexport-diff", progress -> {
+					File binDiff = null;
+					try {
+						binDiff = BinDiffRunner.diff(context.getDecompiler(), other, options, progress);
+						String name = binDiff.getName();
+						progress.stage("Loading results…", 0);
+						progress.throwIfCancelled();
+						// Pass the sink so the (slow, on a big app) reads/class-walk poll cancel.
+						List<BinDiffResults.Match> matches = BinDiffResults.loadMatches(binDiff, progress);
+						BinDiffResults.Header header = BinDiffResults.loadHeader(binDiff);
+						Map<String, MethodNode> index =
+								BinDiffResults.methodIndex(context.getDecompiler(), progress);
+						gui.uiRun(() -> show(gui, name, matches, header, index));
+					} catch (BinDiffRunner.BinDiffNotFound nf) {
+						// Friendlier than the generic failure dialog; returning normally
+						// keeps runGuarded's Throwable handler out of it.
+						gui.uiRun(() -> JOptionPane.showMessageDialog(gui.getMainFrame(),
+								nf.getMessage(), "BinDiff not found", JOptionPane.WARNING_MESSAGE));
+					} finally {
+						// The .BinDiff is fully read by now (show() only needs its name), so
+						// drop it eagerly instead of leaving it for JVM-exit deleteOnExit.
+						if (binDiff != null) {
+							binDiff.delete();
+						}
+					}
+				});
 	}
 
 	private static void show(JadxGuiContext gui, String fileName, List<BinDiffResults.Match> matches,
