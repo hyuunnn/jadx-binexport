@@ -82,6 +82,8 @@ Override the output path if needed (plugin options, also visible in
 ```bash
 jadx -d out app.apk -Pjadx-binexport.output=/path/app.BinExport
 # or a directory:  -Pjadx-binexport.outdir=/some/dir
+# fail the run (non-zero exit) if the export fails, for CI:
+jadx -d out app.apk -Pjadx-binexport.strict=true
 # legacy system properties still work (jadx has no -J passthrough, use env vars):
 #   JADX_OPTS="-Dbinexport.output=/path/app.BinExport" jadx -d out app.apk
 ```
@@ -89,7 +91,8 @@ jadx -d out app.apk -Pjadx-binexport.output=/path/app.BinExport
 Output path resolution (first match wins): `output` option → `outdir` option
 → jadx output dir, with filename `<input-basename>.BinExport`. When exporting two
 versions with the same file name, use distinct paths — an existing file is
-overwritten (with a warning in the log).
+overwritten (with a warning in the log). By default a failed export is logged but
+does not fail the jadx run; `jadx-binexport.strict=true` makes it exit non-zero.
 
 ### GUI (on demand)
 

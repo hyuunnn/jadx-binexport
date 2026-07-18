@@ -217,7 +217,11 @@ public final class Exporter {
 		}
 	}
 
-	/** Shared error contract for the CLI pass and the GUI action. */
+	/**
+	 * Error contract for the CLI/library after-load pass: log and swallow so a
+	 * failed export doesn't also fail jadx's decompilation - UNLESS the strict
+	 * option is set, in which case rethrow so the run exits non-zero (for CI).
+	 */
 	public static void runLogged(JadxDecompiler decompiler, BinExportOptions options) {
 		try {
 			run(decompiler, options);
@@ -225,6 +229,9 @@ public final class Exporter {
 			LOG.info("[BinExport] export cancelled");
 		} catch (Throwable t) {
 			LOG.error("[BinExport] export failed", t);
+			if (options != null && options.isStrict()) {
+				throw t instanceof RuntimeException ? (RuntimeException) t : new RuntimeException(t);
+			}
 		}
 	}
 

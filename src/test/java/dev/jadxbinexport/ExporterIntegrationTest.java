@@ -217,6 +217,42 @@ class ExporterIntegrationTest {
 		System.out.println("[progress] stages reported + cancellation honored (no file written)");
 	}
 
+	/**
+	 * strict mode: a failed export must abort the run (rethrow) so a CI pipeline
+	 * sees a non-zero exit, while the default (lenient) contract swallows it so a
+	 * failed export doesn't also fail jadx's decompilation.
+	 */
+	@Test
+	void strictModeRethrowsExportFailure(@TempDir Path tmp) throws Exception {
+		Path classesDir = compileSample(tmp);
+		// Force the write to fail deterministically: the output path's parent is a
+		// regular file, so mkdirs()/newOutputStream() cannot create it.
+		Path blocker = Files.createFile(tmp.resolve("blocker"));
+		Path badOut = blocker.resolve("out.BinExport");
+
+		JadxArgs args = new JadxArgs();
+		args.getInputFiles().add(classesDir.toFile());
+		args.setOutDir(tmp.resolve("jadx-out").toFile());
+		try (JadxDecompiler jadx = new JadxDecompiler(args)) {
+			jadx.load(); // after-load pass exports to the default out dir (no bad path yet)
+
+			System.setProperty("binexport.output", badOut.toString());
+			try {
+				// Lenient (strict off): the write failure is logged and swallowed.
+				Exporter.runLogged(jadx, new BinExportOptions());
+
+				// Strict on (via the legacy sysprop): the failure is rethrown.
+				System.setProperty("binexport.strict", "true");
+				assertThrows(RuntimeException.class,
+						() -> Exporter.runLogged(jadx, new BinExportOptions()));
+			} finally {
+				System.clearProperty("binexport.output");
+				System.clearProperty("binexport.strict");
+			}
+		}
+		System.out.println("[strict] rethrew on failure when strict, swallowed when lenient");
+	}
+
 	private static boolean anyFlowEdge(BinExport2 be, Predicate<BinExport2.FlowGraph.Edge> pred) {
 		return be.getFlowGraphList().stream()
 				.flatMap(fg -> fg.getEdgeList().stream())

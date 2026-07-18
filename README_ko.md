@@ -79,6 +79,8 @@ jadx -d out_v2 app-v2.apk        # -> out_v2/app-v2.BinExport
 ```bash
 jadx -d out app.apk -Pjadx-binexport.output=/path/app.BinExport
 # 또는 디렉터리:   -Pjadx-binexport.outdir=/some/dir
+# export 실패 시 실행을 실패(non-zero 종료)시키려면 (CI용):
+jadx -d out app.apk -Pjadx-binexport.strict=true
 # 기존 시스템 프로퍼티도 계속 동작 (jadx에는 -J 전달이 없으므로 환경변수 사용):
 #   JADX_OPTS="-Dbinexport.output=/path/app.BinExport" jadx -d out app.apk
 ```
@@ -86,6 +88,8 @@ jadx -d out app.apk -Pjadx-binexport.output=/path/app.BinExport
 출력 경로 결정 순서(먼저 매치되는 것): `output` 옵션 → `outdir` 옵션
 → jadx 출력 디렉터리, 파일명은 `<입력-베이스명>.BinExport`. 같은 파일명의 두 버전을
 export할 때는 경로를 다르게 지정하세요 — 기존 파일은 (로그 경고와 함께) 덮어씁니다.
+기본적으로 export 실패는 로그만 남기고 jadx 실행은 실패시키지 않습니다 —
+`jadx-binexport.strict=true`면 non-zero로 종료합니다.
 
 ### GUI (수동)
 
