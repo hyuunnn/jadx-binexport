@@ -93,7 +93,9 @@ overwritten (with a warning in the log).
 
 ### GUI (on demand)
 
-Open the APK, then **Plugins → Export to BinExport (.BinExport)**.
+Open the APK, then **Plugins → Export to BinExport (.BinExport)**. A progress bar
+shows how far the export has got (a big app takes a minute or two) and lets you
+**Cancel**; when it finishes, a dialog shows where the file was written.
 
 ### Diff in BinDiff
 
@@ -113,7 +115,9 @@ exported to `B.BinExport`:
 
 **Plugins → Open BinExport (.BinExport)…** → pick `B.BinExport`.
 
-The plugin exports A, runs `bindiff` on A vs B, and opens the results in one step.
+The plugin exports A, runs `bindiff` on A vs B, and opens the results in one step,
+with a progress bar (export → running BinDiff → loading results) you can **Cancel**
+at any point — cancelling mid-run stops the export or kills the `bindiff` process.
 A table lists every matched function that belongs to the open app (A), sorted by
 similarity (changed functions first) and colored red→green. **Double-click a row
 (or press Enter) to open that method in jadx.** A filter box narrows the list.
