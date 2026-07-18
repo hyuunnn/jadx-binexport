@@ -51,6 +51,10 @@ final class BinDiffResultsPanel {
 
 	private static final Logger LOG = LoggerFactory.getLogger(BinDiffResultsPanel.class);
 
+	/** Guards the diff action so only one runs at a time (mirrors the export guard). */
+	private static final java.util.concurrent.atomic.AtomicBoolean DIFF_RUNNING =
+			new java.util.concurrent.atomic.AtomicBoolean();
+
 	private BinDiffResultsPanel() {
 	}
 
@@ -72,24 +76,36 @@ final class BinDiffResultsPanel {
 			return;
 		}
 		File other = chooser.getSelectedFile();
+		// One diff at a time: like the Export action's guard, reject a second click
+		// while one runs (each would spawn its own bindiff + dialog + result window).
+		if (!DIFF_RUNNING.compareAndSet(false, true)) {
+			LOG.warn("[BinExport] a diff is already in progress");
+			JOptionPane.showMessageDialog(gui.getMainFrame(),
+					"A diff is already running; wait for it to finish or cancel it.",
+					"BinDiff", JOptionPane.INFORMATION_MESSAGE);
+			return;
+		}
 		// One worker runs export -> bindiff -> read-results -> show, driving a
 		// single progress dialog (with Cancel) across the whole flow. A finally
-		// closes the dialog on every path, and the start() is guarded so a failure
-		// to spawn the thread can't leave the dialog stuck on screen.
+		// closes the dialog, drops the temp .BinDiff, and clears the guard on every
+		// path; the start() is guarded so a failure to spawn the thread can't leave
+		// the dialog stuck on screen or the guard latched.
 		ExportProgressDialog progress =
 				new ExportProgressDialog(gui.getMainFrame(), "Diff against " + other.getName());
 		Thread worker = new Thread(() -> {
+			File binDiff = null;
 			try {
-				File binDiff = BinDiffRunner.diff(context.getDecompiler(), other, options, progress);
+				binDiff = BinDiffRunner.diff(context.getDecompiler(), other, options, progress);
+				String name = binDiff.getName();
 				progress.stage("Loading results…", 0);
 				if (progress.cancelled()) {
 					throw new Exporter.CancelledException();
 				}
-				List<BinDiffResults.Match> matches = BinDiffResults.loadMatches(binDiff);
+				// Pass the sink so the (slow, on a big app) reads/class-walk poll cancel.
+				List<BinDiffResults.Match> matches = BinDiffResults.loadMatches(binDiff, progress);
 				BinDiffResults.Header header = BinDiffResults.loadHeader(binDiff);
-				// Pass the sink so the (slow, on a big app) class walk polls cancel.
 				Map<String, MethodNode> index = BinDiffResults.methodIndex(context.getDecompiler(), progress);
-				gui.uiRun(() -> show(gui, binDiff, matches, header, index));
+				gui.uiRun(() -> show(gui, name, matches, header, index));
 			} catch (BinDiffRunner.BinDiffNotFound nf) {
 				gui.uiRun(() -> JOptionPane.showMessageDialog(gui.getMainFrame(),
 						nf.getMessage(), "BinDiff not found", JOptionPane.WARNING_MESSAGE));
@@ -101,17 +117,24 @@ final class BinDiffResultsPanel {
 						"Diff failed:\n" + t.getMessage(), "BinDiff", JOptionPane.ERROR_MESSAGE));
 			} finally {
 				progress.close();
+				// The .BinDiff is fully read by now (show() only needs its name), so
+				// drop it eagerly instead of leaving it for JVM-exit deleteOnExit.
+				if (binDiff != null) {
+					binDiff.delete();
+				}
+				DIFF_RUNNING.set(false);
 			}
 		}, "binexport-diff");
 		try {
 			worker.start();
 		} catch (Throwable t) {
 			progress.close();
+			DIFF_RUNNING.set(false);
 			throw t;
 		}
 	}
 
-	private static void show(JadxGuiContext gui, File file, List<BinDiffResults.Match> matches,
+	private static void show(JadxGuiContext gui, String fileName, List<BinDiffResults.Match> matches,
 			BinDiffResults.Header header, Map<String, MethodNode> index) {
 		ResultsTableModel model = new ResultsTableModel(matches, index);
 		if (model.getRowCount() == 0) {
@@ -153,7 +176,7 @@ final class BinDiffResultsPanel {
 		JPanel top = new JPanel();
 		top.setLayout(new BoxLayout(top, BoxLayout.X_AXIS));
 		top.setBorder(BorderFactory.createEmptyBorder(6, 8, 6, 8));
-		String sides = header != null ? header.primary + "  ↔  " + header.secondary : file.getName();
+		String sides = header != null ? header.primary + "  ↔  " + header.secondary : fileName;
 		top.add(new JLabel(model.getRowCount() + " matched functions in this app   (" + sides + ")"));
 		top.add(Box.createHorizontalGlue());
 		top.add(new JLabel("Filter: "));
@@ -168,7 +191,7 @@ final class BinDiffResultsPanel {
 		content.add(new JScrollPane(table), BorderLayout.CENTER);
 		content.add(hint, BorderLayout.SOUTH);
 
-		JDialog dialog = new JDialog(gui.getMainFrame(), "BinDiff results — " + file.getName(), false);
+		JDialog dialog = new JDialog(gui.getMainFrame(), "BinDiff results — " + fileName, false);
 		dialog.setContentPane(content);
 		dialog.setSize(820, 520);
 		dialog.setLocationRelativeTo(gui.getMainFrame());

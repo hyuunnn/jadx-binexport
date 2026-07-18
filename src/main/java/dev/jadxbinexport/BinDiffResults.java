@@ -63,12 +63,25 @@ public final class BinDiffResults {
 
 	/** Reads all matched function pairs from a {@code .BinDiff} database. */
 	public static List<Match> loadMatches(File binDiff) throws Exception {
+		return loadMatches(binDiff, ExportProgress.NONE);
+	}
+
+	/**
+	 * As {@link #loadMatches(File)} but polls {@code progress} while iterating the
+	 * (potentially large) function table so a cancel during "Loading results…" is
+	 * acted on mid-read instead of only after the whole table is materialized.
+	 */
+	public static List<Match> loadMatches(File binDiff, ExportProgress progress) throws Exception {
+		ExportProgress prog = ExportProgress.orNone(progress);
 		List<Match> out = new ArrayList<>();
 		try (Connection con = open(binDiff);
 				Statement st = con.createStatement();
 				ResultSet rs = st.executeQuery(
 						"SELECT name1, name2, similarity, confidence FROM function")) {
 			while (rs.next()) {
+				if ((out.size() & 1023) == 0 && prog.cancelled()) {
+					throw new Exporter.CancelledException();
+				}
 				out.add(new Match(
 						rs.getString(1),
 						rs.getString(2),

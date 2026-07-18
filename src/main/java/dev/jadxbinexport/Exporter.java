@@ -198,6 +198,13 @@ public final class Exporter {
 		}
 	}
 
+	/** Cancel poll throttled to every 256th item, for the light per-item loops. */
+	private void checkCancelledEvery(int i) {
+		if ((i & 255) == 0) {
+			checkCancelled();
+		}
+	}
+
 	/**
 	 * Per-iteration cancel poll + throttled progress update for the two big
 	 * loops. {@code done} is 0-based; the bar is advanced to {@code done + 1} and
@@ -332,9 +339,7 @@ public final class Exporter {
 	 */
 	private void resolveBodies() {
 		for (int i = 0; i < methods.size(); i++) {
-			if ((i & 255) == 0) {
-				checkCancelled();
-			}
+			checkCancelledEvery(i);
 			blocksByMethod.add(resolveBlocks(methods.get(i)));
 			calleesByMethod.add(new LinkedHashSet<>());
 		}
@@ -713,9 +718,7 @@ public final class Exporter {
 		// never disagree. Bodyless methods (failed class, oversized) still
 		// contribute call edges from whatever IR is available.
 		for (int i = 0; i < methods.size(); i++) {
-			if ((i & 255) == 0) {
-				checkCancelled();
-			}
+			checkCancelledEvery(i);
 			Set<Integer> callees = calleesByMethod.get(i);
 			if (blocksByMethod.get(i).isEmpty()) {
 				try {
