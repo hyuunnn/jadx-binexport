@@ -117,9 +117,11 @@ public class BinExportOptions extends BasePluginOptionsBuilder {
 	/**
 	 * Coalesces null to a fresh instance, which resolves everything from the
 	 * legacy system properties. The ONE definition of what null options mean -
-	 * shared by the {@code Exporter} constructor and
-	 * {@code BinDiffRunner.warnOnImportsMismatch}, so the mismatch check always
-	 * judges the same setting the export it precedes will use.
+	 * used by the {@code Exporter} constructor, {@code runLogged}'s strict
+	 * check, {@code BinDiffRunner.warnOnImportsMismatch}, and bindiff discovery
+	 * ({@code resolveBindiff}/{@code findBindiff}) - so every consumer judges
+	 * the same settings the export itself will use. Never hand-roll
+	 * {@code options != null ? ... : null}: it silently drops the sysprops.
 	 */
 	static BinExportOptions orDefault(BinExportOptions options) {
 		return options != null ? options : new BinExportOptions();

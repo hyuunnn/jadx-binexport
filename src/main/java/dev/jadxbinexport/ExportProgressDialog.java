@@ -51,11 +51,13 @@ final class ExportProgressDialog implements ExportProgress {
 	private JLabel note;
 	private final List<JDialog> warnings = new ArrayList<>();
 	// Live warning dialogs across ALL flows (EDT-confined): close() deliberately
-	// leaves advisories up on success/failure, so a later flow's cascade must
-	// offset past a prior flow's undismissed warning or the two land pixel-exact
-	// on top of each other (identical parent-centered geometry) and the lower
-	// one looks undismissable.
-	private static int liveWarnings = 0;
+	// leaves advisories up on success/failure, so a later flow must place its
+	// warning below every prior flow's undismissed one or the two land
+	// pixel-exact on top of each other (identical parent-centered geometry) and
+	// the lower one looks undismissable. A LIST of live windows, not a count:
+	// deriving an offset from a count re-created the overlap whenever warnings
+	// were dismissed out of order (the count compacts, window positions don't).
+	private static final List<JDialog> LIVE_WARNINGS = new ArrayList<>();
 	private volatile boolean cancelled;
 
 	ExportProgressDialog(JFrame parent, String title) {
@@ -145,11 +147,12 @@ final class ExportProgressDialog implements ExportProgress {
 	 * while e.g. a long bindiff run proceeds behind the warning. Implemented
 	 * here (not per-caller) so every flow that uses this dialog surfaces warns
 	 * - the interface contract says a log-only warning is invisible in the GUI.
-	 * Warnings are tracked so {@link #close()} can dispose any the user has not
-	 * dismissed when the flow was CANCELLED (an untracked one would orphan;
-	 * on success/failure the advisory deliberately stays up - see close()), and
-	 * placed below this dialog from live geometry so they don't land exactly on
-	 * its Cancel button (both center on the parent).
+	 * Warnings are tracked so {@link #close(boolean)} can dispose any the user
+	 * has not dismissed when the flow actually ENDED cancelled (outcome passed
+	 * in by runGuarded; an untracked one would orphan - on success/failure the
+	 * advisory deliberately stays up, see close), and placed below this dialog
+	 * and every live warning from actual window bounds so they never land on
+	 * the Cancel button or on each other (all center on the parent).
 	 */
 	@Override
 	public void warn(String message) {
@@ -161,26 +164,30 @@ final class ExportProgressDialog implements ExportProgress {
 			// createDialog only hides on OK; dispose so dismissed warnings don't
 			// accumulate as hidden-but-live windows across a session.
 			pane.addPropertyChangeListener(JOptionPane.VALUE_PROPERTY, ev -> d.dispose());
-			// Cascade past every live warning, including prior flows' (static).
-			int cascade = liveWarnings * 24;
-			liveWarnings++;
 			warnings.add(d); // EDT-confined, like all state here
+			LIVE_WARNINGS.add(d);
 			d.addWindowListener(new WindowAdapter() {
 				@Override
 				public void windowClosed(WindowEvent e) {
-					liveWarnings--;
+					LIVE_WARNINGS.remove(d);
 					warnings.remove(d);
 				}
 			});
-			// Place below the progress dialog from LIVE geometry (both center on
-			// the parent, and a magic pixel offset would silently re-cover the
-			// Cancel button if the dialog were ever resized); build() has run by
-			// now (FIFO EDT posts), so `dialog` is set unless its ctor itself
-			// threw - fall back to a parent-relative offset then, matching the
-			// null guards in stage()/update()/close(). Clamp to the screen.
-			int y = dialog != null
-					? dialog.getY() + dialog.getHeight() + 12 + cascade
-					: d.getY() + 170 + cascade;
+			// Place below the progress dialog AND every live warning, from ACTUAL
+			// window bounds (both center on the parent; a magic pixel offset would
+			// silently re-cover the Cancel button on a resize, and a count-derived
+			// cascade overlaps after out-of-order dismissals). `dialog` is set by
+			// build()'s first statement (FIFO EDT posts) unless build() itself
+			// threw ON THE EDT after a successful ctor - a ctor throw would have
+			// made runGuarded bail before any warn - so fall back to a
+			// parent-relative offset then, matching the sibling null guards.
+			int base = dialog != null ? dialog.getY() + dialog.getHeight() : d.getY() + 158;
+			for (JDialog w : LIVE_WARNINGS) {
+				if (w != d && w.isDisplayable()) {
+					base = Math.max(base, w.getY() + w.getHeight());
+				}
+			}
+			int y = base + 12;
 			GraphicsConfiguration gc = parent.getGraphicsConfiguration();
 			if (gc != null) {
 				Rectangle screen = gc.getBounds();

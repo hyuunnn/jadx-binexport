@@ -54,6 +54,8 @@ final class BinDiffResultsPanel {
 	/** Guards the diff action so only one runs at a time (mirrors the export guard). */
 	private static final java.util.concurrent.atomic.AtomicBoolean DIFF_RUNNING =
 			new java.util.concurrent.atomic.AtomicBoolean();
+	/** EDT-confined: true while the file chooser is up (see promptAndDiff). */
+	private static boolean chooserOpen;
 
 	private BinDiffResultsPanel() {
 	}
@@ -75,14 +77,29 @@ final class BinDiffResultsPanel {
 		// the runGuarded kickoff) onto the EDT; runGuarded spawns its own worker
 		// so no long work runs there.
 		gui.uiRun(() -> {
-			JFileChooser chooser = new JFileChooser();
-			chooser.setDialogTitle("Open the OTHER version's .BinExport to diff against this app");
-			chooser.setFileFilter(new FileNameExtensionFilter("BinExport (*.BinExport)", "BinExport"));
-			if (chooser.showOpenDialog(gui.getMainFrame()) != JFileChooser.APPROVE_OPTION) {
+			// The modal chooser PUMPS the EDT queue, so a double-invocation's
+			// second posted lambda would open a second chooser on top of the
+			// first (DIFF_RUNNING only engages after a file is picked). EDT-
+			// confined flag; runGuarded's CAS stays the authoritative guard.
+			if (chooserOpen || DIFF_RUNNING.get()) {
+				JOptionPane.showMessageDialog(gui.getMainFrame(),
+						"A diff is already being set up or running; finish or cancel it first.",
+						"BinDiff", JOptionPane.INFORMATION_MESSAGE);
 				return;
 			}
-			File other = chooser.getSelectedFile();
-			diffAgainst(context, gui, options, other);
+			chooserOpen = true;
+			try {
+				JFileChooser chooser = new JFileChooser();
+				chooser.setDialogTitle("Open the OTHER version's .BinExport to diff against this app");
+				chooser.setFileFilter(new FileNameExtensionFilter("BinExport (*.BinExport)", "BinExport"));
+				if (chooser.showOpenDialog(gui.getMainFrame()) != JFileChooser.APPROVE_OPTION) {
+					return;
+				}
+				File other = chooser.getSelectedFile();
+				diffAgainst(context, gui, options, other);
+			} finally {
+				chooserOpen = false;
+			}
 		});
 	}
 

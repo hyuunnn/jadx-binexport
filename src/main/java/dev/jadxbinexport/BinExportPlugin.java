@@ -20,8 +20,10 @@ import jadx.api.plugins.pass.impl.SimpleAfterLoadPass;
  * <ul>
  *   <li>CLI / library mode: exports automatically once inputs are loaded
  *       (registered as a {@link jadx.api.plugins.pass.types.JadxAfterLoadPass}).</li>
- *   <li>GUI mode: adds a "Plugins" menu action so the (potentially heavy) export
- *       runs on demand instead of on every project load.</li>
+ *   <li>GUI mode: adds two "Plugins" menu actions - on-demand export (the
+ *       potentially heavy export doesn't run on every project load), and
+ *       "Open BinExport (.BinExport)…", the in-GUI diff of the current app
+ *       against another app's export.</li>
  * </ul>
  *
  * <p>Output path resolution (first match wins):

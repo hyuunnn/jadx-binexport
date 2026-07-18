@@ -11,6 +11,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -93,21 +94,31 @@ class BinDiffNavigationTest {
 
 	private static void runBinDiff(Path primary, Path secondary, Path outDir) throws Exception {
 		Files.createDirectories(outDir);
-		Process p = new ProcessBuilder(bindiffCmd(),
-				primary.toString(), secondary.toString(), "--output_dir", outDir.toString())
-				.redirectErrorStream(true).start();
-		p.getInputStream().readAllBytes();
-		assertEquals(0, p.waitFor(), "bindiff exited non-zero");
+		// Production runProcess: bounded (a wedged bindiff cannot hang the Gradle
+		// worker forever), drained on a separate thread, force-killed on timeout -
+		// the raw ProcessBuilder + unbounded readAllBytes it replaces was the last
+		// hand-rolled subprocess copy. Success is asserted by the caller via the
+		// produced .BinDiff file (runProcess's result type is private to the runner).
+		BinDiffRunner.runProcess(TimeUnit.MINUTES.toSeconds(5), ExportProgress.NONE,
+				bindiffCmd(), primary.toString(), secondary.toString(),
+				"--output_dir", outDir.toString());
 	}
+
+	private static String cachedBindiff;
 
 	/**
 	 * Locates bindiff via the production discovery (sysprop, PATH, common paths
 	 * incl. Apple-Silicon Homebrew, 20s-bounded probes) - a hand-rolled copy
 	 * here had drifted (missing /opt/homebrew, unbounded probe) so this test
-	 * skipped on machines where {@link BinDiffRunnerTest} ran.
+	 * skipped on machines where {@link BinDiffRunnerTest} ran. Cached: the
+	 * assume-gate and the diff run both need it, and re-running discovery pays
+	 * the failed-probe subprocess spawns twice.
 	 */
 	private static String bindiffCmd() {
-		return BinDiffRunner.findBindiff(null, ExportProgress.NONE);
+		if (cachedBindiff == null) {
+			cachedBindiff = BinDiffRunner.findBindiff(null, ExportProgress.NONE);
+		}
+		return cachedBindiff;
 	}
 
 	private static Path compile(Path tmp) throws IOException {
