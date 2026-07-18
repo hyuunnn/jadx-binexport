@@ -728,6 +728,9 @@ public final class Exporter {
 
 	private void buildCallGraph() {
 		BinExport2.CallGraph.Builder cg = be.getCallGraphBuilder();
+		// One stage covers this whole phase (bodyless collection + vertices) so the
+		// bar reflects it from the start instead of sitting under the prior label.
+		progress.stage("Building call graph", methods.size());
 
 		// 1. Finish collecting callees. Bodied methods were done while emitting
 		// instruction call targets (buildBodies), so call graph and per-instruction
@@ -752,7 +755,6 @@ public final class Exporter {
 
 		// 2. Vertices in ascending-address order: in-app methods (NORMAL) at
 		// methodAddress(i), then IMPORTED stubs at methodAddress(methods.size()+j).
-		progress.stage("Building call graph", methods.size());
 		for (int i = 0; i < methods.size(); i++) {
 			tick(i, methods.size(), 255);
 			MethodNode mth = methods.get(i);
@@ -783,6 +785,7 @@ public final class Exporter {
 
 		// 3. Edges (targets are vertex indices: in-app methods and IMPORTED stubs).
 		for (int i = 0; i < methods.size(); i++) {
+			checkCancelledEvery(i);
 			for (int t : calleesByMethod.get(i)) {
 				cg.addEdge(BinExport2.CallGraph.Edge.newBuilder()
 						.setSourceVertexIndex(i)

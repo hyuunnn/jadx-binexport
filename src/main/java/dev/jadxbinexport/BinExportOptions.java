@@ -69,12 +69,17 @@ public class BinExportOptions extends BasePluginOptionsBuilder {
 
 	/** True if a failed export should abort the run (plugin option or legacy sysprop). */
 	public boolean isStrict() {
-		return strict || Boolean.parseBoolean(System.getProperty("binexport.strict"));
+		return boolWithProp(strict, "binexport.strict");
 	}
 
 	/** True if external (framework/library) calls should get IMPORTED vertices + edges. */
 	public boolean isImports() {
-		return imports || Boolean.parseBoolean(System.getProperty("binexport.imports"));
+		return boolWithProp(imports, "binexport.imports");
+	}
+
+	/** A boolean option OR-ed with its legacy {@code -D} system-property fallback. */
+	private static boolean boolWithProp(boolean value, String prop) {
+		return value || Boolean.parseBoolean(System.getProperty(prop));
 	}
 
 	private static String firstNonEmpty(String value, String fallback) {
