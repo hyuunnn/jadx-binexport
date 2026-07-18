@@ -53,7 +53,7 @@ class BinDiffClickTest {
 		args.setOutDir(tmp.resolve("jadx-out").toFile());
 		try (JadxDecompiler jadx = new JadxDecompiler(args)) {
 			jadx.load();
-			Map<String, MethodNode> index = BinDiffResults.methodIndex(jadx);
+			Map<String, MethodNode> index = BinDiffResults.methodIndex(jadx, ExportProgress.NONE);
 			MethodNode fib = requireMethod(index, "fib");
 			MethodNode helper = requireMethod(index, "helper");
 

@@ -27,6 +27,11 @@ import jadx.api.plugins.options.impl.BasePluginOptionsBuilder;
  */
 public class BinExportOptions extends BasePluginOptionsBuilder {
 
+	// Legacy sysprop names, each consulted by BOTH the value getter and the
+	// display formatter - one constant so the two can never diverge.
+	private static final String PROP_STRICT = "binexport.strict";
+	private static final String PROP_IMPORTS = "binexport.imports";
+
 	private String output;
 	private String outDir;
 	private String bindiff;
@@ -53,29 +58,27 @@ public class BinExportOptions extends BasePluginOptionsBuilder {
 				.setter(v -> bindiff = v);
 		boolOption(BinExportPlugin.PLUGIN_ID + ".strict")
 				.description("fail the run (non-zero exit) if the export fails, for CI")
-				.formatter(boolFormatter("binexport.strict"))
+				.formatter(boolFormatter(PROP_STRICT))
 				.setter(v -> strict = v);
 		boolOption(BinExportPlugin.PLUGIN_ID + ".imports")
 				.description("also emit IMPORTED vertices/edges for external calls (richer diff, larger output)")
-				.formatter(boolFormatter("binexport.imports"))
+				.formatter(boolFormatter(PROP_IMPORTS))
 				.setter(v -> imports = v);
 	}
 
 	/**
-	 * Formatter for a tri-state boolean option. For null (= unset) it reports
-	 * the EFFECTIVE default - what {@link #boolWithProp} will resolve via the
-	 * legacy sysprop - so the GUI checkbox and {@code jadx plugins} listing
-	 * agree with actual behavior when e.g. JADX_OPTS sets the sysprop true
-	 * (defaultValue() re-applies the formatter on every display, so this stays
-	 * current). Also load-bearing for null itself: jadx's stock bool formatter
-	 * would NPE on our absent defaultValue. Note the GUI persists a value only
-	 * once the user touches the option; a touched-then-restored checkbox stores
-	 * an explicit value that beats the sysprop from then on - intended tri-state
-	 * semantics, with no way to un-set from the GUI.
+	 * Formatter for a tri-state boolean option: delegates to {@link
+	 * #boolWithProp}, so the displayed default is DEFINITIONALLY the effective
+	 * value (unset shows what the legacy sysprop resolves to; defaultValue()
+	 * re-applies the formatter on every display, so it stays current). Also
+	 * load-bearing for null itself: jadx's stock bool formatter would NPE on
+	 * our absent defaultValue. Note the GUI persists a value only once the user
+	 * touches the option; a touched-then-restored checkbox stores an explicit
+	 * value that beats the sysprop from then on - intended tri-state semantics,
+	 * with no way to un-set from the GUI.
 	 */
 	private static Function<Boolean, String> boolFormatter(String prop) {
-		return v -> v != null ? v.toString()
-				: String.valueOf(Boolean.parseBoolean(System.getProperty(prop)));
+		return v -> String.valueOf(boolWithProp(v, prop));
 	}
 
 	public String getOutput() {
@@ -92,12 +95,12 @@ public class BinExportOptions extends BasePluginOptionsBuilder {
 
 	/** True if a failed export should abort the run (plugin option or legacy sysprop). */
 	public boolean isStrict() {
-		return boolWithProp(strict, "binexport.strict");
+		return boolWithProp(strict, PROP_STRICT);
 	}
 
 	/** True if external (framework/library) calls should get IMPORTED vertices + edges. */
 	public boolean isImports() {
-		return boolWithProp(imports, "binexport.imports");
+		return boolWithProp(imports, PROP_IMPORTS);
 	}
 
 	/**
@@ -109,6 +112,17 @@ public class BinExportOptions extends BasePluginOptionsBuilder {
 	 */
 	private static boolean boolWithProp(Boolean value, String prop) {
 		return value != null ? value : Boolean.parseBoolean(System.getProperty(prop));
+	}
+
+	/**
+	 * Coalesces null to a fresh instance, which resolves everything from the
+	 * legacy system properties. The ONE definition of what null options mean -
+	 * shared by the {@code Exporter} constructor and
+	 * {@code BinDiffRunner.warnOnImportsMismatch}, so the mismatch check always
+	 * judges the same setting the export it precedes will use.
+	 */
+	static BinExportOptions orDefault(BinExportOptions options) {
+		return options != null ? options : new BinExportOptions();
 	}
 
 	private static String firstNonEmpty(String value, String fallback) {

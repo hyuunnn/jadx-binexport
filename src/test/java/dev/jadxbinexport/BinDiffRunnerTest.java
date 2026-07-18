@@ -56,14 +56,14 @@ class BinDiffRunnerTest {
 		try (JadxDecompiler jadx = new JadxDecompiler(args)) {
 			jadx.load();
 
-			File binDiff = BinDiffRunner.diff(jadx, otherBinExport, null);
+			File binDiff = BinDiffRunner.diff(jadx, otherBinExport, null, ExportProgress.NONE);
 			assertNotNull(binDiff, "runner returned no .BinDiff");
 			assertTrue(binDiff.isFile(), "no .BinDiff produced");
 
-			List<BinDiffResults.Match> matches = BinDiffResults.loadMatches(binDiff);
+			List<BinDiffResults.Match> matches = BinDiffResults.loadMatches(binDiff, ExportProgress.NONE);
 			assertFalse(matches.isEmpty(), "no matches from in-plugin diff");
 
-			Map<String, MethodNode> index = BinDiffResults.methodIndex(jadx);
+			Map<String, MethodNode> index = BinDiffResults.methodIndex(jadx, ExportProgress.NONE);
 			int resolved = 0;
 			for (BinDiffResults.Match m : matches) {
 				if (BinDiffResults.resolveLocal(m, index) != null) {

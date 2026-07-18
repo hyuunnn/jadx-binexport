@@ -151,17 +151,17 @@ public final class Exporter {
 	}
 
 	private Exporter(BinExportOptions options) {
-		// A fresh options instance resolves everything from the legacy system
-		// properties, so library callers without registered options still work.
-		this.options = options != null ? options : new BinExportOptions();
+		this.options = BinExportOptions.orDefault(options);
 		this.includeImports = this.options.isImports();
 	}
 
-	/** Entry point: build and write the .BinExport file, returning its path. */
-	public static File run(JadxDecompiler decompiler) {
-		return run(decompiler, null);
-	}
-
+	/**
+	 * Entry point: build and write the .BinExport file, returning its path.
+	 * As with {@link #runToFile}, there is deliberately no no-options overload:
+	 * {@code null} options mean legacy-sysprop-only resolution (registered
+	 * plugin options are NOT consulted), and that choice must be visible at the
+	 * call site.
+	 */
 	public static File run(JadxDecompiler decompiler, BinExportOptions options) {
 		return run(decompiler, options, ExportProgress.NONE);
 	}
@@ -200,9 +200,7 @@ public final class Exporter {
 	private File exportLocked(JadxDecompiler decompiler) {
 		try {
 			while (!EXPORT_LOCK.tryLock(200, TimeUnit.MILLISECONDS)) {
-				if (progress.cancelled()) {
-					throw new CancelledException();
-				}
+				progress.throwIfCancelled();
 			}
 		} catch (InterruptedException e) {
 			Thread.currentThread().interrupt();
@@ -217,16 +215,12 @@ public final class Exporter {
 
 	/** Throws if the user asked to cancel; called at each phase boundary. */
 	private void checkCancelled() {
-		if (progress.cancelled()) {
-			throw new CancelledException();
-		}
+		progress.throwIfCancelled();
 	}
 
 	/** Cancel poll throttled to every 256th item, for the light per-item loops. */
 	private void checkCancelledEvery(int i) {
-		if ((i & 255) == 0) {
-			checkCancelled();
-		}
+		progress.throwIfCancelledEvery(i, 255);
 	}
 
 	/**
@@ -778,6 +772,10 @@ public final class Exporter {
 			cg.addVertex(v.build());
 		}
 		if (!importedByRawId.isEmpty()) {
+			// NB: BinDiffRunner.hasImportedVertices infers a file's imports setting
+			// from the PRESENCE of IMPORTED-typed vertices. If vertex typing ever
+			// changes (e.g. the backlog item typing no-code in-app methods as
+			// non-NORMAL), keep that detector in sync.
 			int importedModule = moduleIndexByName("(imported)");
 			int base = methods.size();
 			// Insertion order == j, so these land at vertex indices base+j.

@@ -61,15 +61,12 @@ public final class BinDiffResults {
 	private BinDiffResults() {
 	}
 
-	/** Reads all matched function pairs from a {@code .BinDiff} database. */
-	public static List<Match> loadMatches(File binDiff) throws Exception {
-		return loadMatches(binDiff, ExportProgress.NONE);
-	}
-
 	/**
-	 * As {@link #loadMatches(File)} but polls {@code progress} while iterating the
-	 * (potentially large) function table so a cancel during "Loading results…" is
-	 * acted on mid-read instead of only after the whole table is materialized.
+	 * Reads all matched function pairs from a {@code .BinDiff} database, polling
+	 * {@code progress} (null-tolerated) while iterating the potentially large
+	 * function table so a cancel during "Loading results…" is acted on mid-read
+	 * instead of only after the whole table is materialized. No progress-less
+	 * overload - pass {@code ExportProgress.NONE} visibly.
 	 */
 	public static List<Match> loadMatches(File binDiff, ExportProgress progress) throws Exception {
 		ExportProgress prog = ExportProgress.orNone(progress);
@@ -79,9 +76,7 @@ public final class BinDiffResults {
 				ResultSet rs = st.executeQuery(
 						"SELECT name1, name2, similarity, confidence FROM function")) {
 			while (rs.next()) {
-				if ((out.size() & 1023) == 0 && prog.cancelled()) {
-					throw new Exporter.CancelledException();
-				}
+				prog.throwIfCancelledEvery(out.size(), 1023);
 				out.add(new Match(
 						rs.getString(1),
 						rs.getString(2),
@@ -111,15 +106,9 @@ public final class BinDiffResults {
 	 * navigate to. Enumerates methods exactly like {@link Exporter} (full model
 	 * via {@code getRoot().getClasses()} plus inner/inlined classes, including
 	 * constructors) so the keys line up with the exported {@code mangled_name}s.
-	 */
-	public static Map<String, MethodNode> methodIndex(JadxDecompiler decompiler) {
-		return methodIndex(decompiler, ExportProgress.NONE);
-	}
-
-	/**
-	 * As {@link #methodIndex(JadxDecompiler)} but polls {@code progress} so the
-	 * "Loading results…" class walk (slow on a big app) can be cancelled instead
-	 * of only being discarded after it finishes.
+	 * Polls {@code progress} (null-tolerated) so the class walk (slow on a big
+	 * app) can be cancelled; no progress-less overload - pass
+	 * {@code ExportProgress.NONE} visibly.
 	 */
 	public static Map<String, MethodNode> methodIndex(JadxDecompiler decompiler, ExportProgress progress) {
 		ExportProgress prog = ExportProgress.orNone(progress);
@@ -127,9 +116,7 @@ public final class BinDiffResults {
 		Set<ClassNode> visited = Collections.newSetFromMap(new IdentityHashMap<>());
 		List<ClassNode> classes = decompiler.getRoot().getClasses();
 		for (int i = 0; i < classes.size(); i++) {
-			if ((i & 255) == 0 && prog.cancelled()) {
-				throw new Exporter.CancelledException();
-			}
+			prog.throwIfCancelledEvery(i, 255);
 			// Shared walk (see Exporter.walkClassTree): guarantees this index
 			// enumerates methods exactly like the exporter, so keys line up.
 			Exporter.walkClassTree(classes.get(i), visited, cls -> {

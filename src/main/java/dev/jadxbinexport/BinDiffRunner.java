@@ -2,6 +2,7 @@ package dev.jadxbinexport;
 
 import java.io.BufferedInputStream;
 import java.io.File;
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -64,12 +65,10 @@ final class BinDiffRunner {
 	/**
 	 * Exports the current app, diffs it against {@code otherBinExport}, and
 	 * returns the resulting {@code .BinDiff}. Blocking; run off the EDT.
+	 * No shorter overload (same doctrine as {@code Exporter.runToFile}):
+	 * passing no progress sink must be a visible {@code ExportProgress.NONE} /
+	 * {@code null} at the call site, not an implicit default.
 	 */
-	static File diff(JadxDecompiler decompiler, File otherBinExport, BinExportOptions options)
-			throws Exception {
-		return diff(decompiler, otherBinExport, options, ExportProgress.NONE);
-	}
-
 	static File diff(JadxDecompiler decompiler, File otherBinExport, BinExportOptions options,
 			ExportProgress progressArg) throws Exception {
 		ExportProgress progress = ExportProgress.orNone(progressArg);
@@ -79,13 +78,11 @@ final class BinDiffRunner {
 		try {
 			// Advisory compatibility check FIRST: it needs only the other file and
 			// the options, and its whole point is to warn BEFORE minutes of export
-			// are spent on a mismatched configuration. Cheap now (streamed
-			// call-graph-only read), but still poll cancel around it.
+			// are spent on a mismatched configuration. Cancel is polled inside the
+			// read (CancelPollingInputStream) and once more here.
 			progress.stage("Checking compatibility…", 0);
 			warnOnImportsMismatch(otherBinExport, options, progress);
-			if (progress.cancelled()) {
-				throw new Exporter.CancelledException();
-			}
+			progress.throwIfCancelled();
 
 			File current = new File(work.toFile(), "current.BinExport");
 			// Pass options so the current-app export honors content settings like
@@ -136,25 +133,35 @@ final class BinDiffRunner {
 	 */
 	private static void warnOnImportsMismatch(File other, BinExportOptions options,
 			ExportProgress progress) {
-		// Mirror Exporter's null handling (fresh instance = legacy-sysprop
-		// fallback) so the check judges the SAME setting the export will use.
-		boolean currentImports = (options != null ? options : new BinExportOptions()).isImports();
+		// orDefault mirrors the Exporter constructor, so the check judges the
+		// SAME setting the export it precedes will use.
+		boolean currentImports = BinExportOptions.orDefault(options).isImports();
+		boolean otherImports;
 		try {
-			boolean otherImports = hasImportedVertices(other);
-			if (currentImports != otherImports) {
-				String msg = "The two exports disagree on 'jadx-binexport.imports'"
-						+ " (current app: " + (currentImports ? "on" : "off")
-						+ ", " + other.getName() + ": " + (otherImports ? "on" : "off") + ").\n"
-						+ "Call-graph topology differs systematically between the sides,"
-						+ " so match quality will degrade.\n"
-						+ "Re-export one side so both use the same setting.";
-				LOG.warn("[BinExport] {}", msg.replace('\n', ' '));
-				progress.warn(msg);
-			}
+			otherImports = hasImportedVertices(other, progress);
+		} catch (Exporter.CancelledException c) {
+			throw c; // a user cancel mid-read is not a "check skipped"
 		} catch (Throwable e) {
 			// Best-effort: an unreadable/corrupt file will fail loudly in bindiff
 			// itself with a better message; don't block the diff on the check.
 			LOG.debug("[BinExport] imports-mismatch check skipped: {}", e.toString());
+			return;
+		}
+		if (currentImports != otherImports) {
+			String msg = "The two exports disagree on 'jadx-binexport.imports'"
+					+ " (current app: " + (currentImports ? "on" : "off")
+					+ ", " + other.getName() + ": " + (otherImports ? "on" : "off") + ").\n"
+					+ "Call-graph topology differs systematically between the sides,"
+					+ " so match quality will degrade.\n"
+					+ "Re-export one side so both use the same setting.";
+			LOG.warn("[BinExport] {}", msg.replace('\n', ' '));
+			try {
+				// Guarded separately from the parse so a throwing sink is reported
+				// as failed DELIVERY, not a skipped check - and never kills the diff.
+				progress.warn(msg);
+			} catch (RuntimeException e) {
+				LOG.warn("[BinExport] could not deliver the mismatch warning to the progress sink", e);
+			}
 		}
 	}
 
@@ -164,23 +171,81 @@ final class BinDiffRunner {
 	 * would materialize the instruction/basic-block bulk of a multi-MB file
 	 * (hundreds of MB of message objects) inside the jadx JVM just to answer a
 	 * boolean; skipping to the call graph reads the same bytes but allocates
-	 * only the comparatively small vertex/edge lists.
+	 * only the comparatively small vertex/edge lists. Wire-conformant: a
+	 * singular message field may legally appear in MULTIPLE occurrences (a
+	 * conforming parser merges them), so every occurrence is scanned before
+	 * concluding false; a field-8 tag with the wrong wire type is an unknown
+	 * field to skip, not a message to parse. Polls cancel via the wrapping
+	 * stream - the skip loop otherwise has no poll point and a slow medium
+	 * (network share) would leave Cancel unanswered for the whole read.
 	 */
-	private static boolean hasImportedVertices(File f) throws IOException {
-		try (InputStream in = new BufferedInputStream(Files.newInputStream(f.toPath()))) {
+	private static boolean hasImportedVertices(File f, ExportProgress progress) throws IOException {
+		try (InputStream in = new CancelPollingInputStream(
+				new BufferedInputStream(Files.newInputStream(f.toPath())), progress)) {
 			CodedInputStream cis = CodedInputStream.newInstance(in);
 			int tag;
 			while ((tag = cis.readTag()) != 0) {
-				if (WireFormat.getTagFieldNumber(tag) == BinExport2.CALL_GRAPH_FIELD_NUMBER) {
+				if (WireFormat.getTagFieldNumber(tag) == BinExport2.CALL_GRAPH_FIELD_NUMBER
+						&& WireFormat.getTagWireType(tag) == WireFormat.WIRETYPE_LENGTH_DELIMITED) {
 					BinExport2.CallGraph.Builder cg = BinExport2.CallGraph.newBuilder();
 					cis.readMessage(cg, ExtensionRegistryLite.getEmptyRegistry());
-					return cg.getVertexList().stream()
-							.anyMatch(v -> v.getType() == BinExport2.CallGraph.Vertex.Type.IMPORTED);
+					if (cg.getVertexList().stream()
+							.anyMatch(v -> v.getType() == BinExport2.CallGraph.Vertex.Type.IMPORTED)) {
+						return true;
+					}
+				} else {
+					cis.skipField(tag);
 				}
-				cis.skipField(tag);
 			}
 		}
 		return false;
+	}
+
+	/**
+	 * Polls {@code cancelled()} roughly once per megabyte read/skipped and
+	 * throws {@link Exporter.CancelledException} - gives the otherwise
+	 * poll-free streaming scan in {@link #hasImportedVertices} a cancel point.
+	 */
+	private static final class CancelPollingInputStream extends FilterInputStream {
+		private static final long POLL_BYTES = 1L << 20;
+		private final ExportProgress progress;
+		private long sincePoll;
+
+		CancelPollingInputStream(InputStream in, ExportProgress progress) {
+			super(in);
+			this.progress = progress;
+		}
+
+		private void count(long n) {
+			if (n > 0) {
+				sincePoll += n;
+				if (sincePoll >= POLL_BYTES) {
+					sincePoll = 0;
+					progress.throwIfCancelled();
+				}
+			}
+		}
+
+		@Override
+		public int read() throws IOException {
+			int b = in.read();
+			count(b >= 0 ? 1 : 0);
+			return b;
+		}
+
+		@Override
+		public int read(byte[] b, int off, int len) throws IOException {
+			int n = in.read(b, off, len);
+			count(n);
+			return n;
+		}
+
+		@Override
+		public long skip(long n) throws IOException {
+			long s = in.skip(n);
+			count(s);
+			return s;
+		}
 	}
 
 	/**

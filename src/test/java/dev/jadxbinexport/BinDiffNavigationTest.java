@@ -53,7 +53,7 @@ class BinDiffNavigationTest {
 
 		// Read results and build a navigation index from a fresh jadx session on
 		// the same input - exactly what the GUI action does.
-		List<BinDiffResults.Match> matches = BinDiffResults.loadMatches(binDiff.toFile());
+		List<BinDiffResults.Match> matches = BinDiffResults.loadMatches(binDiff.toFile(), ExportProgress.NONE);
 		assertFalse(matches.isEmpty(), "no matches in results DB");
 
 		JadxArgs args = new JadxArgs();
@@ -61,7 +61,7 @@ class BinDiffNavigationTest {
 		args.setOutDir(tmp.resolve("jadx-out2").toFile());
 		try (JadxDecompiler jadx = new JadxDecompiler(args)) {
 			jadx.load();
-			Map<String, MethodNode> index = BinDiffResults.methodIndex(jadx);
+			Map<String, MethodNode> index = BinDiffResults.methodIndex(jadx, ExportProgress.NONE);
 			assertFalse(index.isEmpty(), "empty method index");
 
 			int resolved = 0;

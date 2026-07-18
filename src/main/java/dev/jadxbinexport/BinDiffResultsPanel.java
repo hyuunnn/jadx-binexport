@@ -101,9 +101,7 @@ final class BinDiffResultsPanel {
 				binDiff = BinDiffRunner.diff(context.getDecompiler(), other, options, progress);
 				String name = binDiff.getName();
 				progress.stage("Loading results…", 0);
-				if (progress.cancelled()) {
-					throw new Exporter.CancelledException();
-				}
+				progress.throwIfCancelled();
 				// Pass the sink so the (slow, on a big app) reads/class-walk poll cancel.
 				List<BinDiffResults.Match> matches = BinDiffResults.loadMatches(binDiff, progress);
 				BinDiffResults.Header header = BinDiffResults.loadHeader(binDiff);
