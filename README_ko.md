@@ -81,6 +81,8 @@ jadx -d out app.apk -Pjadx-binexport.output=/path/app.BinExport
 # 또는 디렉터리:   -Pjadx-binexport.outdir=/some/dir
 # export 실패 시 실행을 실패(non-zero 종료)시키려면 (CI용):
 jadx -d out app.apk -Pjadx-binexport.strict=true
+# 프레임워크 호출까지 IMPORTED 정점/엣지로 내보내려면 (매칭 정확도↑, 파일 커짐):
+jadx -d out app.apk -Pjadx-binexport.imports=true
 # 기존 시스템 프로퍼티도 계속 동작 (jadx에는 -J 전달이 없으므로 환경변수 사용):
 #   JADX_OPTS="-Dbinexport.output=/path/app.BinExport" jadx -d out app.apk
 ```

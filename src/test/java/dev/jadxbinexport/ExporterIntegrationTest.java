@@ -253,6 +253,78 @@ class ExporterIntegrationTest {
 		System.out.println("[strict] rethrew on failure when strict, swallowed when lenient");
 	}
 
+	/**
+	 * The opt-in {@code jadx-binexport.imports}: external (framework/library) calls
+	 * become IMPORTED call-graph vertices + edges. Default (off) must emit NONE
+	 * (byte-for-byte the prior behavior); on must add them, keep the vertex list
+	 * address-sorted, and target them from real edges.
+	 */
+	@Test
+	void importedVerticesAreOptIn(@TempDir Path tmp) throws Exception {
+		// f() calls two external java.lang methods -> two IMPORTED callees when on.
+		String src = "public class Imp {\n"
+				+ "  public int f(int n) { return Math.max(n, 0) + Integer.parseInt(\"7\"); }\n"
+				+ "}\n";
+		Path classesDir = compileClass(tmp, "Imp", src);
+
+		JadxArgs args = new JadxArgs();
+		args.getInputFiles().add(classesDir.toFile());
+		args.setOutDir(tmp.resolve("jadx-out").toFile());
+		try (JadxDecompiler jadx = new JadxDecompiler(args)) {
+			jadx.load();
+
+			// Default OFF: no IMPORTED vertices at all.
+			Path off = tmp.resolve("off.BinExport");
+			Exporter.runToFile(jadx, off.toFile());
+			BinExport2 beOff = parse(off);
+			assertTrue(beOff.getCallGraph().getVertexList().stream()
+					.noneMatch(v -> v.getType() == BinExport2.CallGraph.Vertex.Type.IMPORTED),
+					"imports off must emit no IMPORTED vertices");
+
+			// ON: IMPORTED vertices present, an edge targets one, list stays sorted.
+			Path on = tmp.resolve("on.BinExport");
+			System.setProperty("binexport.imports", "true");
+			try {
+				Exporter.runToFile(jadx, on.toFile(), ExportProgress.NONE, new BinExportOptions());
+			} finally {
+				System.clearProperty("binexport.imports");
+			}
+			BinExport2 beOn = parse(on);
+			List<BinExport2.CallGraph.Vertex> vs = beOn.getCallGraph().getVertexList();
+
+			int firstImported = -1;
+			long prev = -1;
+			for (int i = 0; i < vs.size(); i++) {
+				BinExport2.CallGraph.Vertex v = vs.get(i);
+				assertTrue(v.getAddress() > prev, "vertices must stay sorted by ascending address");
+				prev = v.getAddress();
+				if (v.getType() == BinExport2.CallGraph.Vertex.Type.IMPORTED && firstImported < 0) {
+					firstImported = i;
+				}
+			}
+			assertTrue(firstImported >= 0, "imports on must emit IMPORTED vertices");
+			assertTrue(vs.size() > beOff.getCallGraph().getVertexCount(),
+					"imports on must add vertices");
+			boolean anyExternalName = vs.stream()
+					.filter(v -> v.getType() == BinExport2.CallGraph.Vertex.Type.IMPORTED)
+					.anyMatch(v -> v.getMangledName().contains("Math") || v.getMangledName().contains("Integer"));
+			assertTrue(anyExternalName, "an IMPORTED vertex should name an external callee");
+			final int imported = firstImported;
+			boolean edgeToImport = beOn.getCallGraph().getEdgeList().stream()
+					.anyMatch(e -> e.getTargetVertexIndex() >= imported);
+			assertTrue(edgeToImport, "some call edge must target an IMPORTED vertex");
+
+			System.out.println("[imports] off=" + beOff.getCallGraph().getVertexCount()
+					+ " vertices, on=" + vs.size() + " (with IMPORTED); edges target imports");
+		}
+	}
+
+	private static BinExport2 parse(Path file) throws IOException {
+		try (InputStream is = Files.newInputStream(file)) {
+			return BinExport2.parseFrom(is);
+		}
+	}
+
 	private static boolean anyFlowEdge(BinExport2 be, Predicate<BinExport2.FlowGraph.Edge> pred) {
 		return be.getFlowGraphList().stream()
 				.flatMap(fg -> fg.getEdgeList().stream())
@@ -260,10 +332,14 @@ class ExporterIntegrationTest {
 	}
 
 	private static Path compileSample(Path tmp) throws IOException {
+		return compileClass(tmp, "Sample", SAMPLE);
+	}
+
+	private static Path compileClass(Path tmp, String className, String source) throws IOException {
 		Path srcDir = Files.createDirectories(tmp.resolve("src"));
 		Path classesDir = Files.createDirectories(tmp.resolve("classes"));
-		Path src = srcDir.resolve("Sample.java");
-		Files.write(src, SAMPLE.getBytes());
+		Path src = srcDir.resolve(className + ".java");
+		Files.write(src, source.getBytes());
 
 		JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
 		assertNotNull(compiler, "JDK (not JRE) required to run this test");

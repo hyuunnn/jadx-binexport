@@ -72,7 +72,9 @@ final class BinDiffRunner {
 		Path work = Files.createTempDirectory("jadx-binexport");
 		try {
 			File current = new File(work.toFile(), "current.BinExport");
-			Exporter.runToFile(decompiler, current, progress);
+			// Pass options so the current-app export honors content settings like
+			// jadx-binexport.imports (the explicit path still bypasses path options).
+			Exporter.runToFile(decompiler, current, progress, options);
 
 			// bindiff has no progress protocol, so show it as an indeterminate stage;
 			// runProcess polls progress.cancelled() so Cancel kills a running bindiff.

@@ -84,6 +84,8 @@ jadx -d out app.apk -Pjadx-binexport.output=/path/app.BinExport
 # or a directory:  -Pjadx-binexport.outdir=/some/dir
 # fail the run (non-zero exit) if the export fails, for CI:
 jadx -d out app.apk -Pjadx-binexport.strict=true
+# also emit IMPORTED vertices/edges for framework calls (richer diff, larger file):
+jadx -d out app.apk -Pjadx-binexport.imports=true
 # legacy system properties still work (jadx has no -J passthrough, use env vars):
 #   JADX_OPTS="-Dbinexport.output=/path/app.BinExport" jadx -d out app.apk
 ```

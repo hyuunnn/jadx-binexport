@@ -13,6 +13,7 @@ import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -122,6 +123,14 @@ public final class Exporter {
 	private final Map<MethodInfo, Integer> calleeOperandIdx = new IdentityHashMap<>();
 	private final Map<MethodInfo, String> calleeRawIdCache = new IdentityHashMap<>();
 
+	// Opt-in (jadx-binexport.imports): external (framework/library) callees become
+	// IMPORTED call-graph vertices. rawId -> j; the vertex index is methods.size()
+	// + j and its address is methodAddress(that), keeping the whole vertex list
+	// address-sorted (all imports sit above every in-app method). Insertion order
+	// == j, so iterating this map adds vertices at the indices the edges expect.
+	private final boolean includeImports;
+	private final Map<String, Integer> importedByRawId = new LinkedHashMap<>();
+
 	private int binDiffOversized = 0;
 
 	// Operand de-dup keyed by the primitive that fully determines the operand
@@ -144,6 +153,7 @@ public final class Exporter {
 		// A fresh options instance resolves everything from the legacy system
 		// properties, so library callers without registered options still work.
 		this.options = options != null ? options : new BinExportOptions();
+		this.includeImports = this.options.isImports();
 	}
 
 	/** Entry point: build and write the .BinExport file, returning its path. */
@@ -168,7 +178,17 @@ public final class Exporter {
 	}
 
 	public static File runToFile(JadxDecompiler decompiler, File out, ExportProgress progress) {
-		Exporter e = new Exporter(null);
+		return runToFile(decompiler, out, progress, null);
+	}
+
+	/**
+	 * Exports to an explicit file (path options bypassed) but honoring content
+	 * options like {@code imports} - so the in-GUI diff's current-app export
+	 * respects the same {@code jadx-binexport.imports} setting as a plain export.
+	 */
+	public static File runToFile(JadxDecompiler decompiler, File out, ExportProgress progress,
+			BinExportOptions options) {
+		Exporter e = new Exporter(options);
 		e.explicitOutput = out;
 		e.progress = ExportProgress.orNone(progress);
 		return e.exportLocked(decompiler);
@@ -708,10 +728,31 @@ public final class Exporter {
 
 	private void buildCallGraph() {
 		BinExport2.CallGraph.Builder cg = be.getCallGraphBuilder();
-		progress.stage("Building call graph", methods.size());
 
-		// Vertices, in method-index order => addresses are strictly ascending,
-		// which BinDiff requires.
+		// 1. Finish collecting callees. Bodied methods were done while emitting
+		// instruction call targets (buildBodies), so call graph and per-instruction
+		// data can never disagree; collect the bodyless ones (failed class,
+		// oversized) now - and, with imports on, this must happen BEFORE numbering
+		// vertices so the IMPORTED set is complete.
+		for (int i = 0; i < methods.size(); i++) {
+			checkCancelledEvery(i);
+			if (blocksByMethod.get(i).isEmpty()) {
+				try {
+					for (BlockNode b : rawBlocks(methods.get(i))) {
+						for (InsnNode insn : b.getInstructions()) {
+							collectCallees(insn, calleesByMethod.get(i));
+						}
+					}
+				} catch (Throwable t) {
+					// Partially-transformed IR of a failed class may throw anywhere;
+					// keep the callees collected so far instead of killing the export.
+				}
+			}
+		}
+
+		// 2. Vertices in ascending-address order: in-app methods (NORMAL) at
+		// methodAddress(i), then IMPORTED stubs at methodAddress(methods.size()+j).
+		progress.stage("Building call graph", methods.size());
 		for (int i = 0; i < methods.size(); i++) {
 			tick(i, methods.size(), 255);
 			MethodNode mth = methods.get(i);
@@ -726,27 +767,23 @@ public final class Exporter {
 			}
 			cg.addVertex(v.build());
 		}
-
-		// Edges for methods with exported bodies were collected while emitting
-		// instruction call targets, so call graph and per-instruction data can
-		// never disagree. Bodyless methods (failed class, oversized) still
-		// contribute call edges from whatever IR is available.
-		for (int i = 0; i < methods.size(); i++) {
-			checkCancelledEvery(i);
-			Set<Integer> callees = calleesByMethod.get(i);
-			if (blocksByMethod.get(i).isEmpty()) {
-				try {
-					for (BlockNode b : rawBlocks(methods.get(i))) {
-						for (InsnNode insn : b.getInstructions()) {
-							collectCallees(insn, callees);
-						}
-					}
-				} catch (Throwable t) {
-					// Partially-transformed IR of a failed class may throw anywhere;
-					// keep the callees collected so far instead of killing the export.
-				}
+		if (!importedByRawId.isEmpty()) {
+			int importedModule = moduleIndexByName("(imported)");
+			int base = methods.size();
+			// Insertion order == j, so these land at vertex indices base+j.
+			for (Map.Entry<String, Integer> e : importedByRawId.entrySet()) {
+				cg.addVertex(BinExport2.CallGraph.Vertex.newBuilder()
+						.setAddress(methodAddress(base + e.getValue()))
+						.setMangledName(e.getKey())
+						.setType(BinExport2.CallGraph.Vertex.Type.IMPORTED)
+						.setModuleIndex(importedModule)
+						.build());
 			}
-			for (int t : callees) {
+		}
+
+		// 3. Edges (targets are vertex indices: in-app methods and IMPORTED stubs).
+		for (int i = 0; i < methods.size(); i++) {
+			for (int t : calleesByMethod.get(i)) {
 				cg.addEdge(BinExport2.CallGraph.Edge.newBuilder()
 						.setSourceVertexIndex(i)
 						.setTargetVertexIndex(t)
@@ -782,15 +819,33 @@ public final class Exporter {
 		// Misses (external callees, the common case) are cached via sentinel -
 		// computeIfAbsent would drop a null mapping and recompute every time.
 		int idx = calleeIdxCache.computeIfAbsent(callee, c -> {
-			Integer i = methodIndexByRawId.get(calleeRawId(c));
-			return i != null ? i : NOT_IN_APP;
+			String rid = calleeRawId(c);
+			Integer i = methodIndexByRawId.get(rid);
+			if (i != null) {
+				return i; // in-app method: vertex index == method index
+			}
+			if (!includeImports) {
+				return NOT_IN_APP; // external, imports off: dropped (default behavior)
+			}
+			// External, imports on: give it an IMPORTED vertex index (methods.size()
+			// + j), assigned in first-encounter order (deterministic sweep).
+			Integer j = importedByRawId.get(rid);
+			if (j == null) {
+				j = importedByRawId.size();
+				importedByRawId.put(rid, j);
+			}
+			return methods.size() + j;
 		});
 		return idx == NOT_IN_APP ? null : idx;
 	}
 
 	private int moduleIndex(ClassNode cls) {
-		return moduleIdx.computeIfAbsent(cls.getClassInfo().getFullName(), name -> {
-			be.addModule(BinExport2.Module.newBuilder().setName(name).build());
+		return moduleIndexByName(cls.getClassInfo().getFullName());
+	}
+
+	private int moduleIndexByName(String name) {
+		return moduleIdx.computeIfAbsent(name, n -> {
+			be.addModule(BinExport2.Module.newBuilder().setName(n).build());
 			return be.getModuleCount() - 1;
 		});
 	}

@@ -12,12 +12,16 @@ import jadx.api.plugins.options.impl.BasePluginOptionsBuilder;
  *       {@code <input-basename>.BinExport}</li>
  *   <li>{@code jadx-binexport.strict} - fail the run (non-zero exit) if the
  *       export fails, for CI pipelines</li>
+ *   <li>{@code jadx-binexport.imports} - also emit IMPORTED call-graph vertices
+ *       + edges for external (framework/library) calls, for richer diff matching
+ *       (off by default; larger output)</li>
  * </ul>
  *
  * <p>The old JVM-global system properties {@code binexport.output} /
- * {@code binexport.outdir} / {@code binexport.strict} are still honored as a
- * fallback, but plugin options are scoped to one decompiler instance and
- * therefore safe when several instances run in the same JVM.
+ * {@code binexport.outdir} / {@code binexport.strict} / {@code binexport.imports}
+ * are still honored as a fallback, but plugin options are scoped to one
+ * decompiler instance and therefore safe when several instances run in the same
+ * JVM.
  */
 public class BinExportOptions extends BasePluginOptionsBuilder {
 
@@ -25,6 +29,7 @@ public class BinExportOptions extends BasePluginOptionsBuilder {
 	private String outDir;
 	private String bindiff;
 	private boolean strict;
+	private boolean imports;
 
 	@Override
 	public void registerOptions() {
@@ -44,6 +49,10 @@ public class BinExportOptions extends BasePluginOptionsBuilder {
 				.description("fail the run (non-zero exit) if the export fails, for CI")
 				.defaultValue(false)
 				.setter(v -> strict = v);
+		boolOption(BinExportPlugin.PLUGIN_ID + ".imports")
+				.description("also emit IMPORTED vertices/edges for external calls (richer diff, larger output)")
+				.defaultValue(false)
+				.setter(v -> imports = v);
 	}
 
 	public String getOutput() {
@@ -61,6 +70,11 @@ public class BinExportOptions extends BasePluginOptionsBuilder {
 	/** True if a failed export should abort the run (plugin option or legacy sysprop). */
 	public boolean isStrict() {
 		return strict || Boolean.parseBoolean(System.getProperty("binexport.strict"));
+	}
+
+	/** True if external (framework/library) calls should get IMPORTED vertices + edges. */
+	public boolean isImports() {
+		return imports || Boolean.parseBoolean(System.getProperty("binexport.imports"));
 	}
 
 	private static String firstNonEmpty(String value, String fallback) {
