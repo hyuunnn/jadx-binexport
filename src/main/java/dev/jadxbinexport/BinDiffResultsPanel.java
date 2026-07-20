@@ -163,22 +163,34 @@ final class BinDiffResultsPanel {
 		TableRowSorter<ResultsTableModel> sorter = (TableRowSorter<ResultsTableModel>) table.getRowSorter();
 
 		JTextField filter = new JTextField();
+		// Filtering re-runs the RowFilter over every row and re-sorts, on the EDT.
+		// So (a) coalesce a burst of keystrokes into ONE pass ~200ms after typing
+		// stops (a large result table would otherwise re-filter+re-sort on every
+		// character, freezing input), and (b) match against the model's precomputed
+		// lowercase names via plain contains() instead of compiling a regex per
+		// keystroke. The Swing Timer fires on the EDT, where setRowFilter must run.
+		javax.swing.Timer debounce = new javax.swing.Timer(200, e -> {
+			String needle = filter.getText().trim().toLowerCase(java.util.Locale.ROOT);
+			sorter.setRowFilter(needle.isEmpty() ? null
+					: new RowFilter<ResultsTableModel, Integer>() {
+						@Override
+						public boolean include(Entry<? extends ResultsTableModel, ? extends Integer> entry) {
+							return model.matches(entry.getIdentifier(), needle);
+						}
+					});
+		});
+		debounce.setRepeats(false);
 		filter.getDocument().addDocumentListener(new DocumentListener() {
-			private void apply() {
-				String q = filter.getText().trim();
-				sorter.setRowFilter(q.isEmpty() ? null : RowFilter.regexFilter("(?i)" + java.util.regex.Pattern.quote(q)));
-			}
-
 			public void insertUpdate(DocumentEvent e) {
-				apply();
+				debounce.restart();
 			}
 
 			public void removeUpdate(DocumentEvent e) {
-				apply();
+				debounce.restart();
 			}
 
 			public void changedUpdate(DocumentEvent e) {
-				apply();
+				debounce.restart();
 			}
 		});
 
@@ -272,6 +284,12 @@ final class BinDiffResultsPanel {
 		private final List<Double> similarity = new java.util.ArrayList<>();
 		private final List<Double> confidence = new java.util.ArrayList<>();
 		private final List<MethodNode> targets = new java.util.ArrayList<>();
+		// Lowercased copies of the two name columns, computed once here so filtering
+		// is a couple of allocation-free contains() per row (no per-keystroke
+		// lowercasing or regex). Checked separately (not concatenated) so a query
+		// can never match across the two names. Parallel to the columns above.
+		private final List<String> localLower = new java.util.ArrayList<>();
+		private final List<String> otherLower = new java.util.ArrayList<>();
 
 		ResultsTableModel(List<BinDiffResults.Match> matches, Map<String, MethodNode> index) {
 			for (BinDiffResults.Match m : matches) {
@@ -279,12 +297,22 @@ final class BinDiffResultsPanel {
 				if (target == null) {
 					continue; // this pair's functions aren't in the open app
 				}
-				local.add(target.getMethodInfo().getRawFullId());
-				other.add(BinDiffResults.counterpart(m, index));
+				String localName = target.getMethodInfo().getRawFullId();
+				String otherName = BinDiffResults.counterpart(m, index);
+				local.add(localName);
+				other.add(otherName);
 				similarity.add(m.similarity);
 				confidence.add(m.confidence);
 				targets.add(target);
+				localLower.add(localName.toLowerCase(java.util.Locale.ROOT));
+				otherLower.add(otherName.toLowerCase(java.util.Locale.ROOT));
 			}
+		}
+
+		/** True if either function name of this row contains the already-lowercased query. */
+		boolean matches(int modelRow, String needleLower) {
+			return localLower.get(modelRow).contains(needleLower)
+					|| otherLower.get(modelRow).contains(needleLower);
 		}
 
 		MethodNode methodAt(int modelRow) {
