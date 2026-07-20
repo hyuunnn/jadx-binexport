@@ -86,6 +86,15 @@ jadx -d out app.apk -Pjadx-binexport.imports=true
 #   주의: jadx 버전과 마찬가지로 `imports` 설정도 diff 양쪽이 일치해야 합니다.
 #   한쪽만 켜면 콜그래프 구조가 달라져 매칭 품질이 떨어집니다 (GUI diff는
 #   불일치를 감지해 경고합니다).
+# 번들 라이브러리 노이즈 제거: 패키지(클래스명 접두사, 쉼표 구분)를 통째로 제외.
+# androidx/kotlin/okhttp 등은 DEX에 함께 컴파일돼 일반 함수로 export되어 diff를
+#부풀립니다. export 시점에 아예 빼버리세요:
+jadx -d out app.apk -Pjadx-binexport.exclude-packages=androidx,kotlin,com.google
+# 또는 내 코드만 화이트리스트 (나머지는 전부 제외):
+jadx -d out app.apk -Pjadx-binexport.include-packages=com.example.myapp
+#   .BinExport가 작아져 BinDiff가 훨씬 빨라짐. 남은 함수는 그대로라 필터한 파일도
+#   전체 파일과 겹치는 함수끼리 정상 diff됩니다 (BinDiff는 구조/이름으로 매칭).
+#   가장 깨끗한 결과를 위해 양쪽을 같은 방식으로 필터하세요.
 # 기존 시스템 프로퍼티도 계속 동작 (jadx에는 -J 전달이 없으므로 환경변수 사용):
 #   JADX_OPTS="-Dbinexport.output=/path/app.BinExport" jadx -d out app.apk
 ```

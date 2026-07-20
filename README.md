@@ -89,6 +89,15 @@ jadx -d out app.apk -Pjadx-binexport.imports=true
 #   NOTE: like the jadx version, `imports` must MATCH on both sides of a diff -
 #   an on/off mismatch changes call-graph topology and degrades match quality
 #   (the in-GUI diff detects and warns about this).
+# cut bundled-library noise: skip whole packages (comma-separated name prefixes).
+# Bundled libs (androidx, kotlin, okhttp, ...) are compiled INTO the DEX, so they
+# export as normal functions and bloat the diff; drop them at export time:
+jadx -d out app.apk -Pjadx-binexport.exclude-packages=androidx,kotlin,com.google
+# or whitelist only your own code (everything else is dropped):
+jadx -d out app.apk -Pjadx-binexport.include-packages=com.example.myapp
+#   Smaller .BinExport => much faster BinDiff; surviving functions are unchanged
+#   (BinDiff matches by structure/name, so a filtered file still diffs a full one
+#   on their overlap). Filter both sides the same way for the cleanest results.
 # legacy system properties still work (jadx has no -J passthrough, use env vars):
 #   JADX_OPTS="-Dbinexport.output=/path/app.BinExport" jadx -d out app.apk
 ```

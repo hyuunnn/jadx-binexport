@@ -132,6 +132,18 @@ public final class Exporter {
 	private final boolean includeImports;
 	private final Map<String, Integer> importedByRawId = new LinkedHashMap<>();
 
+	// Package (class-name prefix) filters. A class is exported only if it passes
+	// includePrefixes (empty = allow all) AND is not matched by excludePrefixes.
+	// Filtered-out classes never enter `methods`, so downstream (sort, addresses,
+	// call graph) simply operates on the smaller set; calls INTO a filtered class
+	// become external (dropped, or IMPORTED when imports is on), exactly like a
+	// framework call. Output stays deterministic and, for the classes that DO
+	// survive, structurally identical to an unfiltered export (BinDiff matches by
+	// structure/name, not by the file-local addresses that shift when the set
+	// shrinks), so a filtered and an unfiltered file still diff on their overlap.
+	private final List<String> includePrefixes;
+	private final List<String> excludePrefixes;
+
 	private int binDiffOversized = 0;
 
 	// Operand de-dup keyed by the primitive that fully determines the operand
@@ -153,6 +165,24 @@ public final class Exporter {
 	private Exporter(BinExportOptions options) {
 		this.options = BinExportOptions.orDefault(options);
 		this.includeImports = this.options.isImports();
+		this.includePrefixes = parsePrefixes(this.options.getIncludePackages());
+		this.excludePrefixes = parsePrefixes(this.options.getExcludePackages());
+	}
+
+	/** Splits a comma/whitespace-separated prefix list, dropping blanks. */
+	private static List<String> parsePrefixes(String raw) {
+		if (raw == null || raw.isEmpty()) {
+			return Collections.emptyList();
+		}
+		List<String> out = new ArrayList<>();
+		// The split delimiter already consumes surrounding whitespace, so tokens are
+		// clean; a leading/trailing/doubled separator only yields empty tokens.
+		for (String part : raw.split("[,\\s]+")) {
+			if (!part.isEmpty()) {
+				out.add(part);
+			}
+		}
+		return out;
 	}
 
 	/**
@@ -262,6 +292,14 @@ public final class Exporter {
 			tick(i, topClasses.size(), 63);
 			collect(topClasses.get(i), visited);
 		}
+		if (!includePrefixes.isEmpty() || !excludePrefixes.isEmpty()) {
+			LOG.info("[BinExport] package filter active (include={}, exclude={}); {} method(s) selected",
+					includePrefixes, excludePrefixes, methods.size());
+			if (methods.isEmpty()) {
+				LOG.warn("[BinExport] package filter excluded every class - the export will be empty;"
+						+ " check jadx-binexport.include-packages / exclude-packages");
+			}
+		}
 
 		// 2. Deterministic method ordering => stable synthetic addresses. Drop
 		// duplicate rawIds (the same class present in two inputs / deduplicated
@@ -326,6 +364,13 @@ public final class Exporter {
 
 	private void collect(ClassNode cls, Set<ClassNode> visited) {
 		walkClassTree(cls, visited, c -> {
+			// Package filter: skip the class entirely (no forceProcess, no methods)
+			// when it fails the include/exclude prefixes. The shared walkClassTree
+			// still visits its inner/inlined children, which are judged by their own
+			// names - normally the same package, so they fall away too.
+			if (!includeClass(c)) {
+				return;
+			}
 			try {
 				// Run the decompile passes (block splitting, SSA, dominators, region
 				// making) WITHOUT code generation. Plain cls.decompile() would unload
@@ -339,6 +384,43 @@ public final class Exporter {
 			}
 			methods.addAll(c.getMethods());
 		});
+	}
+
+	/**
+	 * True when {@code cls} passes the package (class-name prefix) filters: it must
+	 * match the include whitelist (empty = allow all) and must not match any
+	 * exclude prefix. Matching is on the class's dot-separated full name, treating
+	 * each configured value as a package/class prefix ({@code androidx} matches
+	 * {@code androidx.core.X} and {@code androidx.core.X$Inner}, not
+	 * {@code androidxfoo.X}).
+	 */
+	private boolean includeClass(ClassNode cls) {
+		if (includePrefixes.isEmpty() && excludePrefixes.isEmpty()) {
+			return true;
+		}
+		String name = cls.getClassInfo().getFullName();
+		if (!includePrefixes.isEmpty() && !matchesAnyPrefix(name, includePrefixes)) {
+			return false;
+		}
+		return !matchesAnyPrefix(name, excludePrefixes);
+	}
+
+	private static boolean matchesAnyPrefix(String name, List<String> prefixes) {
+		for (String p : prefixes) {
+			// Prefix match without allocating "p." / "p$" per class: p must be the
+			// whole name or be followed by a package (.) or inner-class ($) boundary,
+			// so "androidx" matches "androidx.core.X" but not "androidxfoo.X".
+			if (name.startsWith(p)) {
+				if (name.length() == p.length()) {
+					return true;
+				}
+				char boundary = name.charAt(p.length());
+				if (boundary == '.' || boundary == '$') {
+					return true;
+				}
+			}
+		}
+		return false;
 	}
 
 	/**

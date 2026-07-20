@@ -17,13 +17,18 @@ import jadx.api.plugins.options.impl.BasePluginOptionsBuilder;
  *   <li>{@code jadx-binexport.imports} - also emit IMPORTED call-graph vertices
  *       + edges for external (framework/library) calls, for richer diff matching
  *       (off by default; larger output)</li>
+ *   <li>{@code jadx-binexport.include-packages} - comma-separated class-name
+ *       prefixes; when set, ONLY classes under one of them are exported (whitelist)</li>
+ *   <li>{@code jadx-binexport.exclude-packages} - comma-separated class-name
+ *       prefixes whose classes are skipped (e.g. {@code androidx,kotlin} to drop
+ *       bundled-library noise); applied after include</li>
  * </ul>
  *
  * <p>The old JVM-global system properties {@code binexport.output} /
- * {@code binexport.outdir} / {@code binexport.strict} / {@code binexport.imports}
- * are still honored as a fallback, but plugin options are scoped to one
- * decompiler instance and therefore safe when several instances run in the same
- * JVM.
+ * {@code binexport.outdir} / {@code binexport.strict} / {@code binexport.imports} /
+ * {@code binexport.include-packages} / {@code binexport.exclude-packages} are
+ * still honored as a fallback, but plugin options are scoped to one decompiler
+ * instance and therefore safe when several instances run in the same JVM.
  */
 public class BinExportOptions extends BasePluginOptionsBuilder {
 
@@ -35,6 +40,8 @@ public class BinExportOptions extends BasePluginOptionsBuilder {
 	private String output;
 	private String outDir;
 	private String bindiff;
+	private String includePackages;
+	private String excludePackages;
 	// Tri-state (null = not set): an explicit =false must beat a JVM-global
 	// legacy sysprop =true, which an OR over a primitive boolean cannot express.
 	// No defaultValue is registered, so jadx's parseOption passes null through
@@ -56,6 +63,14 @@ public class BinExportOptions extends BasePluginOptionsBuilder {
 				.description("path to the bindiff executable (for in-GUI diffing)")
 				.defaultValue("")
 				.setter(v -> bindiff = v);
+		strOption(BinExportPlugin.PLUGIN_ID + ".include-packages")
+				.description("comma-separated class-name prefixes; export ONLY these (whitelist, empty = all)")
+				.defaultValue("")
+				.setter(v -> includePackages = v);
+		strOption(BinExportPlugin.PLUGIN_ID + ".exclude-packages")
+				.description("comma-separated class-name prefixes to skip, e.g. androidx,kotlin (applied after include)")
+				.defaultValue("")
+				.setter(v -> excludePackages = v);
 		boolOption(BinExportPlugin.PLUGIN_ID + ".strict")
 				.description("fail the run (non-zero exit) if the export fails, for CI")
 				.formatter(boolFormatter(PROP_STRICT))
@@ -91,6 +106,16 @@ public class BinExportOptions extends BasePluginOptionsBuilder {
 
 	public String getBindiff() {
 		return firstNonEmpty(bindiff, System.getProperty("binexport.bindiff"));
+	}
+
+	/** Comma-separated class-name prefixes to export exclusively (empty = all classes). */
+	public String getIncludePackages() {
+		return firstNonEmpty(includePackages, System.getProperty("binexport.include-packages"));
+	}
+
+	/** Comma-separated class-name prefixes to skip (applied after the include whitelist). */
+	public String getExcludePackages() {
+		return firstNonEmpty(excludePackages, System.getProperty("binexport.exclude-packages"));
 	}
 
 	/** True if a failed export should abort the run (plugin option or legacy sysprop). */

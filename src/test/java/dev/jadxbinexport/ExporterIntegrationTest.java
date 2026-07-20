@@ -329,6 +329,52 @@ class ExporterIntegrationTest {
 		}
 	}
 
+	/**
+	 * Package include/exclude filters: {@code exclude-packages} drops matching
+	 * classes from the export entirely, and {@code include-packages} keeps only
+	 * whitelisted ones. This is how bundled-library noise (androidx, kotlin, ...)
+	 * is cut before a diff. Driven through the registered plugin options.
+	 */
+	@Test
+	void packageFiltersSelectClasses(@TempDir Path tmp) throws Exception {
+		// Two classes in two packages, compiled into the same classes dir.
+		TestCompiler.compile(tmp, "Keep",
+				"package app.keep;\npublic class Keep { public int a() { return 1; } }\n");
+		Path classesDir = TestCompiler.compile(tmp, "Drop",
+				"package lib.drop;\npublic class Drop { public int b() { return 2; } }\n");
+
+		JadxArgs args = new JadxArgs();
+		args.getInputFiles().add(classesDir.toFile());
+		args.setOutDir(tmp.resolve("jadx-out").toFile());
+		try (JadxDecompiler jadx = new JadxDecompiler(args)) {
+			jadx.load();
+
+			// exclude lib.drop -> Keep stays, Drop is gone.
+			Path excl = tmp.resolve("excl.BinExport");
+			BinExportOptions optsExcl = new BinExportOptions();
+			optsExcl.setOptions(Map.of(BinExportPlugin.PLUGIN_ID + ".exclude-packages", "lib.drop"));
+			Exporter.runToFile(jadx, excl.toFile(), ExportProgress.NONE, optsExcl);
+			List<BinExport2.CallGraph.Vertex> vsExcl = parse(excl).getCallGraph().getVertexList();
+			assertTrue(vsExcl.stream().anyMatch(v -> v.getMangledName().contains("Keep")),
+					"excluded export must still contain the kept package");
+			assertFalse(vsExcl.stream().anyMatch(v -> v.getMangledName().contains("Drop")),
+					"excluded package must be absent");
+
+			// include only app.keep -> same result from the whitelist side.
+			Path incl = tmp.resolve("incl.BinExport");
+			BinExportOptions optsIncl = new BinExportOptions();
+			optsIncl.setOptions(Map.of(BinExportPlugin.PLUGIN_ID + ".include-packages", "app.keep"));
+			Exporter.runToFile(jadx, incl.toFile(), ExportProgress.NONE, optsIncl);
+			List<BinExport2.CallGraph.Vertex> vsIncl = parse(incl).getCallGraph().getVertexList();
+			assertTrue(vsIncl.stream().anyMatch(v -> v.getMangledName().contains("Keep")),
+					"whitelist must keep the included package");
+			assertFalse(vsIncl.stream().anyMatch(v -> v.getMangledName().contains("Drop")),
+					"whitelist must drop everything else");
+
+			System.out.println("[filter] exclude/include package filters select the right classes");
+		}
+	}
+
 	private static BinExport2 parse(Path file) throws IOException {
 		try (InputStream is = Files.newInputStream(file)) {
 			return BinExport2.parseFrom(is);
