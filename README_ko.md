@@ -92,9 +92,10 @@ jadx -d out app.apk -Pjadx-binexport.imports=true
 jadx -d out app.apk -Pjadx-binexport.exclude-packages=androidx,kotlin,com.google
 # 또는 내 코드만 화이트리스트 (나머지는 전부 제외):
 jadx -d out app.apk -Pjadx-binexport.include-packages=com.example.myapp
-#   .BinExport가 작아져 BinDiff가 훨씬 빨라짐. 남은 함수는 그대로라 필터한 파일도
-#   전체 파일과 겹치는 함수끼리 정상 diff됩니다 (BinDiff는 구조/이름으로 매칭).
-#   가장 깨끗한 결과를 위해 양쪽을 같은 방식으로 필터하세요.
+#   .BinExport가 작아져 BinDiff가 훨씬 빨라짐. 필터한 파일도 전체 파일과 겹치는
+#   함수끼리 정상 diff됩니다(이름/플로우그래프/raw_bytes 매칭은 보존). 다만 제외한
+#   패키지로의 콜그래프 엣지가 빠지므로, 매칭 품질을 위해 양쪽을 같은 방식으로
+#   필터하는 게 좋습니다(콜그래프 위상이 매칭을 좌우하는 난독화 앱에서 특히 중요).
 # 기존 시스템 프로퍼티도 계속 동작 (jadx에는 -J 전달이 없으므로 환경변수 사용):
 #   JADX_OPTS="-Dbinexport.output=/path/app.BinExport" jadx -d out app.apk
 ```

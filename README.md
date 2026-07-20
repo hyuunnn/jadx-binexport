@@ -95,9 +95,11 @@ jadx -d out app.apk -Pjadx-binexport.imports=true
 jadx -d out app.apk -Pjadx-binexport.exclude-packages=androidx,kotlin,com.google
 # or whitelist only your own code (everything else is dropped):
 jadx -d out app.apk -Pjadx-binexport.include-packages=com.example.myapp
-#   Smaller .BinExport => much faster BinDiff; surviving functions are unchanged
-#   (BinDiff matches by structure/name, so a filtered file still diffs a full one
-#   on their overlap). Filter both sides the same way for the cleanest results.
+#   Smaller .BinExport => much faster BinDiff. A filtered file still diffs a full
+#   one on their overlap (name/flow-graph/raw_bytes matching is preserved), but
+#   filtering drops call-graph edges into the removed packages, so match quality
+#   is best when you filter BOTH sides the same way (important on obfuscated apps,
+#   where call-graph topology carries the match).
 # legacy system properties still work (jadx has no -J passthrough, use env vars):
 #   JADX_OPTS="-Dbinexport.output=/path/app.BinExport" jadx -d out app.apk
 ```

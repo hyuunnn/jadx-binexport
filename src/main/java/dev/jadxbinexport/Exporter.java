@@ -1,5 +1,6 @@
 package dev.jadxbinexport;
 
+import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -89,6 +90,8 @@ public final class Exporter {
 
 	/** InsnType is a small fixed enum; derive each mnemonic string exactly once. */
 	private static final Map<InsnType, String> MNEMONIC_BY_TYPE = buildMnemonicTable();
+	/** "~<mnemonic>" per type, so the wrapped-arg operand symbol allocates nothing. */
+	private static final Map<InsnType, String> WRAP_SYMBOL_BY_TYPE = buildWrapSymbolTable();
 
 	private final Builder be = BinExport2.newBuilder();
 
@@ -97,9 +100,10 @@ public final class Exporter {
 	private ExportProgress progress = ExportProgress.NONE;
 
 	private final List<MethodNode> methods = new ArrayList<>();
-	// MethodInfo.getRawFullId() rebuilds its string on every call and is used in
-	// sorting, index lookups and naming, so cache it per method.
-	private final Map<MethodNode, String> rawIdCache = new IdentityHashMap<>();
+	// getRawFullId() rebuilds its string per call and feeds sorting, index lookups
+	// and naming; it is cached ONCE per interned MethodInfo in calleeRawIdCache and
+	// rawId(MethodNode) delegates there, so an in-app method that is also a callee
+	// no longer builds and retains the same id string twice.
 	private final Map<String, Integer> methodIndexByRawId = new HashMap<>();
 	// Top-level classes whose forceProcess failed: their IR may be partially
 	// transformed, so their methods are exported as call-graph vertices only.
@@ -115,6 +119,11 @@ public final class Exporter {
 	// throwaway set + StringBuilder per instruction. Cleared before each use.
 	private final Set<Integer> insnCallees = new LinkedHashSet<>();
 	private final StringBuilder renderBuf = new StringBuilder(64);
+	// Per-method block index map, reused across all 170k+ methods (cleared per
+	// method). Holds the method-LOCAL block index (blocks/method is usually <128,
+	// so the boxed Integer comes from the JDK cache); the global index is
+	// firstGlobal + local, computed at the use sites.
+	private final Map<BlockNode, Integer> blockLocalIdx = new IdentityHashMap<>();
 
 	// jadx interns MethodInfo, so callee resolution and callee symbol operands
 	// are cached by identity - getRawFullId() rebuilds its string per call, and
@@ -137,10 +146,14 @@ public final class Exporter {
 	// Filtered-out classes never enter `methods`, so downstream (sort, addresses,
 	// call graph) simply operates on the smaller set; calls INTO a filtered class
 	// become external (dropped, or IMPORTED when imports is on), exactly like a
-	// framework call. Output stays deterministic and, for the classes that DO
-	// survive, structurally identical to an unfiltered export (BinDiff matches by
-	// structure/name, not by the file-local addresses that shift when the set
-	// shrinks), so a filtered and an unfiltered file still diff on their overlap.
+	// framework call. Output stays deterministic. A filtered file still diffs an
+	// unfiltered one on their overlap, but a surviving function is NOT byte
+	// identical across the two: file-local indices shift (addresses; the mnemonic
+	// histogram is per-file so mnemonic_index can differ), and with imports off a
+	// caller loses the call_target/call-graph edges into filtered callees - so
+	// call-graph topology (a signal BinDiff's MD-index matchers use) degrades on
+	// the overlap. Its flow graph, raw_bytes and names are preserved. For the
+	// cleanest diff, filter both sides the same way.
 	private final List<String> includePrefixes;
 	private final List<String> excludePrefixes;
 
@@ -178,8 +191,15 @@ public final class Exporter {
 		// The split delimiter already consumes surrounding whitespace, so tokens are
 		// clean; a leading/trailing/doubled separator only yields empty tokens.
 		for (String part : raw.split("[,\\s]+")) {
-			if (!part.isEmpty()) {
-				out.add(part);
+			// Strip a trailing package/inner separator: "androidx." is the natural
+			// way to write a prefix, but matchesAnyPrefix appends its OWN boundary,
+			// so a prefix that already ends in '.'/'$' would otherwise match nothing.
+			int end = part.length();
+			while (end > 0 && (part.charAt(end - 1) == '.' || part.charAt(end - 1) == '$')) {
+				end--;
+			}
+			if (end > 0) {
+				out.add(end == part.length() ? part : part.substring(0, end));
 			}
 		}
 		return out;
@@ -296,8 +316,13 @@ public final class Exporter {
 			LOG.info("[BinExport] package filter active (include={}, exclude={}); {} method(s) selected",
 					includePrefixes, excludePrefixes, methods.size());
 			if (methods.isEmpty()) {
-				LOG.warn("[BinExport] package filter excluded every class - the export will be empty;"
-						+ " check jadx-binexport.include-packages / exclude-packages");
+				String msg = "package filter excluded every class - the export will be empty;"
+						+ " check jadx-binexport.include-packages / exclude-packages";
+				LOG.warn("[BinExport] {}", msg);
+				// Also surface via the advisory channel: a log-only message is invisible
+				// in jadx-gui without the Log Viewer (see gotcha 3), and the Export
+				// action would otherwise pop a plain "success" dialog for an empty file.
+				progress.warn(msg);
 			}
 		}
 
@@ -343,7 +368,10 @@ public final class Exporter {
 		if (out.exists()) {
 			LOG.warn("[BinExport] overwriting existing {}", out.getAbsolutePath());
 		}
-		try (OutputStream os = Files.newOutputStream(out.toPath())) {
+		// Buffer the write: protobuf's CodedOutputStream flushes a small (~4KB)
+		// internal buffer straight to the stream, so an unbuffered channel stream
+		// turns a 200MB export into ~50k write syscalls; a 64KB buffer cuts that ~16x.
+		try (OutputStream os = new BufferedOutputStream(Files.newOutputStream(out.toPath()), 1 << 16)) {
 			be.build().writeTo(os);
 		} catch (IOException e) {
 			throw new RuntimeException("BinExport write failed: " + out, e);
@@ -389,10 +417,12 @@ public final class Exporter {
 	/**
 	 * True when {@code cls} passes the package (class-name prefix) filters: it must
 	 * match the include whitelist (empty = allow all) and must not match any
-	 * exclude prefix. Matching is on the class's dot-separated full name, treating
-	 * each configured value as a package/class prefix ({@code androidx} matches
-	 * {@code androidx.core.X} and {@code androidx.core.X$Inner}, not
-	 * {@code androidxfoo.X}).
+	 * exclude prefix. Matching is on {@code ClassInfo.getFullName()}, which joins
+	 * inner classes with '.' (NOT '$' - that is the raw/mangled form), treating
+	 * each configured value as a package/class prefix: {@code androidx} matches
+	 * {@code androidx.core.X} and its inner {@code androidx.core.X.Inner}, but not
+	 * {@code androidxfoo.X}. A trailing '.'/'$' in a prefix is stripped by
+	 * {@link #parsePrefixes}, so "androidx" and "androidx." behave identically.
 	 */
 	private boolean includeClass(ClassNode cls) {
 		if (includePrefixes.isEmpty() && excludePrefixes.isEmpty()) {
@@ -557,7 +587,13 @@ public final class Exporter {
 			long base = methodAddress(mi);
 			long seq = 0;
 			Set<Integer> methodCallees = calleesByMethod.get(mi);
-			Map<BlockNode, Integer> blockGlobalIdx = new IdentityHashMap<>();
+			// Blocks are emitted contiguously, so a block's GLOBAL index is
+			// firstGlobal + its emission-order LOCAL index. Storing the local index
+			// keeps the boxed value in the Integer cache and lets one map serve
+			// every method (cleared here) instead of a fresh map per method.
+			blockLocalIdx.clear();
+			int firstGlobal = be.getBasicBlockCount();
+			int local = 0;
 
 			for (BlockNode b : blocks) {
 				int firstInsn = be.getInstructionCount();
@@ -576,31 +612,31 @@ public final class Exporter {
 				if (endExclusive != firstInsn + 1) {
 					range.setEndIndex(endExclusive);
 				}
-				blockGlobalIdx.put(b, be.getBasicBlockCount());
+				blockLocalIdx.put(b, local++);
 				be.addBasicBlock(BinExport2.BasicBlock.newBuilder().addInstructionIndex(range).build());
 			}
 
 			BinExport2.FlowGraph.Builder fg = BinExport2.FlowGraph.newBuilder();
 			BlockNode entry = mth.getEnterBlock();
-			Integer entryIdx = entry != null ? blockGlobalIdx.get(entry) : null;
-			if (entryIdx == null) {
-				entryIdx = blockGlobalIdx.get(blocks.get(0));
+			Integer entryLocal = entry != null ? blockLocalIdx.get(entry) : null;
+			if (entryLocal == null) {
+				entryLocal = blockLocalIdx.get(blocks.get(0));
 			}
-			fg.setEntryBasicBlockIndex(entryIdx);
+			fg.setEntryBasicBlockIndex(firstGlobal + entryLocal);
 
 			for (BlockNode b : blocks) {
-				int src = blockGlobalIdx.get(b);
+				int src = firstGlobal + blockLocalIdx.get(b);
 				fg.addBasicBlockIndex(src);
 				List<BlockNode> succs = b.getSuccessors();
 				InsnNode last = lastInsn(b);
 				for (BlockNode succ : succs) {
-					Integer dst = blockGlobalIdx.get(succ);
-					if (dst == null) {
+					Integer dstLocal = blockLocalIdx.get(succ);
+					if (dstLocal == null) {
 						continue;
 					}
 					BinExport2.FlowGraph.Edge.Builder edge = BinExport2.FlowGraph.Edge.newBuilder()
 							.setSourceBasicBlockIndex(src)
-							.setTargetBasicBlockIndex(dst)
+							.setTargetBasicBlockIndex(firstGlobal + dstLocal)
 							.setType(edgeType(last, succs.size(), succ));
 					if (isBackEdge(b, succ)) {
 						edge.setIsBackEdge(true);
@@ -634,9 +670,7 @@ public final class Exporter {
 		// so the byte length is never used to reconstruct addresses.
 		ib.setRawBytes(insn == null ? NOP_BYTES : renderBytes(insn));
 		if (insn != null) {
-			for (int opIndex : buildOperands(insn)) {
-				ib.addOperandIndex(opIndex);
-			}
+			addOperands(insn, ib);
 			// call_target for every invoke in this insn's tree: jadx folds many
 			// invokes into operand trees (InsnWrapArg) and those calls belong to
 			// this instruction too. Self-recursion is kept - reference BinExport
@@ -652,23 +686,27 @@ public final class Exporter {
 		be.addInstruction(ib.build());
 	}
 
-	private List<Integer> buildOperands(InsnNode insn) {
-		List<Integer> ops = new ArrayList<>();
+	/**
+	 * Appends this instruction's operand indices straight onto the builder. Adds
+	 * them in the same order as before (callee symbol, result, then args) but with
+	 * no per-instruction {@code ArrayList}/boxing - this runs on every one of the
+	 * ~1.8M instructions of a real app (see the pooled scratch in emitInstruction).
+	 */
+	private void addOperands(InsnNode insn, BinExport2.Instruction.Builder ib) {
 		if (insn instanceof BaseInvokeNode) {
 			MethodInfo callee = ((BaseInvokeNode) insn).getCallMth();
 			if (callee != null) {
-				ops.add(calleeOperandIdx.computeIfAbsent(callee,
+				ib.addOperandIndex(calleeOperandIdx.computeIfAbsent(callee,
 						c -> operandForSymbol(calleeRawId(c))));
 			}
 		}
 		RegisterArg result = insn.getResult();
 		if (result != null) {
-			ops.add(operandForArg(result));
+			ib.addOperandIndex(operandForArg(result));
 		}
 		for (InsnArg arg : insn.getArguments()) {
-			ops.add(operandForArg(arg));
+			ib.addOperandIndex(operandForArg(arg));
 		}
-		return ops;
 	}
 
 	private int operandForArg(InsnArg arg) {
@@ -679,8 +717,11 @@ public final class Exporter {
 			return operandForRegister(((RegisterArg) arg).getRegNum());
 		}
 		if (arg.isInsnWrap()) {
+			// "~<mnemonic>" precomputed per InsnType (WRAP_SYMBOL_BY_TYPE): jadx folds
+			// invokes into operand trees, so wrapped args are common and a fresh
+			// "~"+mnemonic concat per occurrence is pure waste.
 			InsnNode wrapped = arg.unwrap();
-			return operandForSymbol("~" + (wrapped != null ? mnemonicOf(wrapped) : "wrap"));
+			return operandForSymbol(wrapped != null ? WRAP_SYMBOL_BY_TYPE.get(wrapped.getType()) : "~wrap");
 		}
 		return operandForSymbol("arg");
 	}
@@ -1010,7 +1051,9 @@ public final class Exporter {
 	}
 
 	private String rawId(MethodNode mth) {
-		return rawIdCache.computeIfAbsent(mth, m -> m.getMethodInfo().getRawFullId());
+		// Delegate to the MethodInfo-keyed cache so the id string is built and
+		// retained once, whether reached via a method or via a call site.
+		return calleeRawId(mth.getMethodInfo());
 	}
 
 	private static InsnNode lastInsn(BlockNode b) {
@@ -1060,6 +1103,14 @@ public final class Exporter {
 		Map<InsnType, String> map = new EnumMap<>(InsnType.class);
 		for (InsnType type : InsnType.values()) {
 			map.put(type, type.name().toLowerCase(Locale.ROOT).replace('_', '-'));
+		}
+		return map;
+	}
+
+	private static Map<InsnType, String> buildWrapSymbolTable() {
+		Map<InsnType, String> map = new EnumMap<>(InsnType.class);
+		for (Map.Entry<InsnType, String> e : MNEMONIC_BY_TYPE.entrySet()) {
+			map.put(e.getKey(), "~" + e.getValue());
 		}
 		return map;
 	}
