@@ -1,6 +1,5 @@
 package dev.jadxbinexport;
 
-import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -28,6 +27,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.google.protobuf.ByteString;
+import com.google.protobuf.CodedOutputStream;
 import com.google.security.zynamics.BinExport.BinExport2;
 import com.google.security.zynamics.BinExport.BinExport2.Builder;
 
@@ -100,10 +100,8 @@ public final class Exporter {
 	private ExportProgress progress = ExportProgress.NONE;
 
 	private final List<MethodNode> methods = new ArrayList<>();
-	// getRawFullId() rebuilds its string per call and feeds sorting, index lookups
-	// and naming; it is cached ONCE per interned MethodInfo in calleeRawIdCache and
-	// rawId(MethodNode) delegates there, so an in-app method that is also a callee
-	// no longer builds and retains the same id string twice.
+	// rawId (a method's mangled_name) -> its index in `methods`, which is also its
+	// call-graph vertex index; the in-app set that callee resolution looks up.
 	private final Map<String, Integer> methodIndexByRawId = new HashMap<>();
 	// Top-level classes whose forceProcess failed: their IR may be partially
 	// transformed, so their methods are exported as call-graph vertices only.
@@ -131,6 +129,9 @@ public final class Exporter {
 	private static final int NOT_IN_APP = -1;
 	private final Map<MethodInfo, Integer> calleeIdxCache = new IdentityHashMap<>();
 	private final Map<MethodInfo, Integer> calleeOperandIdx = new IdentityHashMap<>();
+	// Cached mangled_name per interned MethodInfo. rawId(MethodNode) also routes
+	// here (via getMethodInfo()), so an in-app method that is also a callee builds
+	// and retains its getRawFullId() string once, not once per role.
 	private final Map<MethodInfo, String> calleeRawIdCache = new IdentityHashMap<>();
 
 	// Opt-in (jadx-binexport.imports): external (framework/library) callees become
@@ -191,15 +192,21 @@ public final class Exporter {
 		// The split delimiter already consumes surrounding whitespace, so tokens are
 		// clean; a leading/trailing/doubled separator only yields empty tokens.
 		for (String part : raw.split("[,\\s]+")) {
-			// Strip a trailing package/inner separator: "androidx." is the natural
-			// way to write a prefix, but matchesAnyPrefix appends its OWN boundary,
-			// so a prefix that already ends in '.'/'$' would otherwise match nothing.
+			// Strip leading/trailing package/inner separators: "androidx." is the
+			// natural way to write a prefix and ".androidx" a plausible paste, but
+			// matchesAnyPrefix appends its OWN boundary and matches against names
+			// that never start with a separator, so an un-trimmed '.'/'$' at either
+			// end would make the prefix match nothing.
+			int start = 0;
 			int end = part.length();
-			while (end > 0 && (part.charAt(end - 1) == '.' || part.charAt(end - 1) == '$')) {
+			while (start < end && (part.charAt(start) == '.' || part.charAt(start) == '$')) {
+				start++;
+			}
+			while (end > start && (part.charAt(end - 1) == '.' || part.charAt(end - 1) == '$')) {
 				end--;
 			}
-			if (end > 0) {
-				out.add(end == part.length() ? part : part.substring(0, end));
+			if (start < end) {
+				out.add(start == 0 && end == part.length() ? part : part.substring(start, end));
 			}
 		}
 		return out;
@@ -368,11 +375,15 @@ public final class Exporter {
 		if (out.exists()) {
 			LOG.warn("[BinExport] overwriting existing {}", out.getAbsolutePath());
 		}
-		// Buffer the write: protobuf's CodedOutputStream flushes a small (~4KB)
-		// internal buffer straight to the stream, so an unbuffered channel stream
-		// turns a 200MB export into ~50k write syscalls; a 64KB buffer cuts that ~16x.
-		try (OutputStream os = new BufferedOutputStream(Files.newOutputStream(out.toPath()), 1 << 16)) {
-			be.build().writeTo(os);
+		// Buffer the write through a single 64KB CodedOutputStream: protobuf's
+		// default writeTo(OutputStream) flushes a ~4KB internal buffer straight to
+		// the channel (~50k write syscalls for a 200MB export); a 64KB buffer cuts
+		// that ~16x, and using CodedOutputStream directly (vs wrapping in a
+		// BufferedOutputStream) avoids copying the bytes through two buffers.
+		try (OutputStream os = Files.newOutputStream(out.toPath())) {
+			CodedOutputStream cos = CodedOutputStream.newInstance(os, 1 << 16);
+			be.build().writeTo(cos);
+			cos.flush();
 		} catch (IOException e) {
 			throw new RuntimeException("BinExport write failed: " + out, e);
 		}
